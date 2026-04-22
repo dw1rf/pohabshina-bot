@@ -219,9 +219,10 @@ bot = MovieBot()
 
 @bot.event
 async def on_ready() -> None:
+    await asyncio.sleep(2)
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game("подбираю фильмы")
+        activity=discord.Game(name="Просмотр фильмов")
     )
     print(f"Вошёл как {bot.user} (ID: {bot.user.id if bot.user else 'unknown'})")
 
