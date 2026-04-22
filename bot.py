@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-WATCHMODE_API_KEY = os.getenv("WATCHMODE_API_KEY") or os.getenv("TMDB_API_KEY")
+WATCHMODE_API_KEY = os.getenv("WATCHMODE_API_KEY")
 WATCHMODE_REGION = os.getenv("WATCHMODE_REGION", "US").upper()
 WATCHMODE_LIMIT = int(os.getenv("WATCHMODE_LIMIT", "80"))
 
@@ -20,7 +20,7 @@ if not DISCORD_TOKEN:
     raise RuntimeError("Не задан DISCORD_TOKEN")
 
 if not WATCHMODE_API_KEY:
-    raise RuntimeError("Не задан WATCHMODE_API_KEY (или TMDB_API_KEY как fallback)")
+    raise RuntimeError("Не задан WATCHMODE_API_KEY")
 
 COMMON_GENRE_ALIASES = {
     "боевик": "action",
