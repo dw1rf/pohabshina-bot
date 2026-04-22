@@ -14,8 +14,15 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 WATCHMODE_API_KEY = os.getenv("WATCHMODE_API_KEY")
 WATCHMODE_REGION = "US"
-print("WATCHMODE_REGION =", WATCHMODE_REGION)
 WATCHMODE_LIMIT = int(os.getenv("WATCHMODE_LIMIT", "80"))
+
+TRANSLATE_API_URL = os.getenv("TRANSLATE_API_URL", "").strip()
+TRANSLATE_API_KEY = os.getenv("TRANSLATE_API_KEY", "").strip()
+TRANSLATE_SOURCE_LANG = os.getenv("TRANSLATE_SOURCE_LANG", "auto").strip()
+TRANSLATE_TARGET_LANG = os.getenv("TRANSLATE_TARGET_LANG", "ru").strip()
+SHOW_BOTH_TITLES = os.getenv("SHOW_BOTH_TITLES", "1").strip() == "1"
+
+print("WATCHMODE_REGION =", WATCHMODE_REGION)
 
 if not DISCORD_TOKEN:
     raise RuntimeError("Не задан DISCORD_TOKEN")
@@ -51,9 +58,56 @@ COMMON_GENRE_ALIASES = {
     "вестерн": "western",
 }
 
+GENRE_RU = {
+    "Action": "Боевик",
+    "Action & Adventure": "Боевик и приключения",
+    "Adult": "Для взрослых",
+    "Adventure": "Приключения",
+    "Animation": "Анимация",
+    "Anime": "Аниме",
+    "Biography": "Биография",
+    "Comedy": "Комедия",
+    "Crime": "Криминал",
+    "Documentary": "Документальный",
+    "Drama": "Драма",
+    "Family": "Семейный",
+    "Fantasy": "Фэнтези",
+    "Food": "Еда",
+    "Game Show": "Игровое шоу",
+    "History": "История",
+    "Horror": "Ужасы",
+    "Kids": "Детский",
+    "Music": "Музыка",
+    "Musical": "Мюзикл",
+    "Mystery": "Детектив",
+    "Nature": "Природа",
+    "News": "Новости",
+    "Reality": "Реалити",
+    "Romance": "Мелодрама",
+    "Sci-Fi & Fantasy": "Фантастика и фэнтези",
+    "Science Fiction": "Фантастика",
+    "Soap": "Мыльная опера",
+    "Sports": "Спорт",
+    "Supernatural": "Сверхъестественное",
+    "Talk": "Ток-шоу",
+    "Thriller": "Триллер",
+    "Travel": "Путешествия",
+    "TV Movie": "Телефильм",
+    "War": "Военный",
+    "War & Politics": "Война и политика",
+    "Western": "Вестерн",
+}
+
 
 def normalize_text(value: str) -> str:
     return " ".join(value.strip().lower().replace("/", " ").split())
+
+
+def truncate_text(value: str, limit: int) -> str:
+    value = (value or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
 
 
 class MovieBot(commands.Bot):
@@ -63,6 +117,7 @@ class MovieBot(commands.Bot):
         self.session: aiohttp.ClientSession | None = None
         self.genre_name_to_id: dict[str, int] = {}
         self.genre_id_to_name: dict[int, str] = {}
+        self.translation_cache: dict[str, str] = {}
 
     async def setup_hook(self) -> None:
         timeout = aiohttp.ClientTimeout(total=30)
@@ -91,6 +146,83 @@ class MovieBot(commands.Bot):
                 raise RuntimeError(f"Watchmode HTTP {response.status}: {text[:500]}")
             return await response.json()
 
+    async def translate_text(self, text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return text
+
+        cache_key = f"{TRANSLATE_SOURCE_LANG}|{TRANSLATE_TARGET_LANG}|{text}"
+        cached = self.translation_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if not TRANSLATE_API_URL:
+            self.translation_cache[cache_key] = text
+            return text
+
+        if not self.session:
+            return text
+
+        payload = {
+            "q": text,
+            "source": TRANSLATE_SOURCE_LANG,
+            "target": TRANSLATE_TARGET_LANG,
+            "format": "text",
+        }
+
+        headers: dict[str, str] = {}
+        if TRANSLATE_API_KEY:
+            payload["api_key"] = TRANSLATE_API_KEY
+
+        try:
+            async with self.session.post(
+                TRANSLATE_API_URL,
+                json=payload,
+                headers=headers,
+            ) as response:
+                if response.status != 200:
+                    translated = text
+                else:
+                    data = await response.json(content_type=None)
+                    translated = text
+
+                    if isinstance(data, dict):
+                        translated = (
+                            data.get("translatedText")
+                            or data.get("translation")
+                            or data.get("translated")
+                            or text
+                        )
+                    elif isinstance(data, list) and data:
+                        first = data[0]
+                        if isinstance(first, dict):
+                            translated = (
+                                first.get("translatedText")
+                                or first.get("translation")
+                                or first.get("translated")
+                                or text
+                            )
+
+        except Exception:
+            translated = text
+
+        translated = str(translated).strip() or text
+        self.translation_cache[cache_key] = translated
+        return translated
+
+    async def translate_title_for_display(self, title: str) -> str:
+        title = (title or "").strip()
+        if not title:
+            return "Без названия"
+
+        translated = await self.translate_text(title)
+        if not translated or normalize_text(translated) == normalize_text(title):
+            return title
+
+        if SHOW_BOTH_TITLES:
+            return f"{translated} / {title}"
+        return translated
+
     async def load_genres(self) -> None:
         data = await self.watchmode_get("/genres/")
 
@@ -106,8 +238,12 @@ class MovieBot(commands.Bot):
             if not genre_id or not genre_name:
                 continue
 
-            self.genre_id_to_name[int(genre_id)] = str(genre_name)
-            self.genre_name_to_id[normalize_text(str(genre_name))] = int(genre_id)
+            genre_name = str(genre_name)
+            genre_name_ru = GENRE_RU.get(genre_name, genre_name)
+
+            self.genre_id_to_name[int(genre_id)] = genre_name_ru
+            self.genre_name_to_id[normalize_text(genre_name)] = int(genre_id)
+            self.genre_name_to_id[normalize_text(genre_name_ru)] = int(genre_id)
 
         for ru_alias, english_name in COMMON_GENRE_ALIASES.items():
             normalized_en = normalize_text(english_name)
@@ -222,7 +358,7 @@ async def on_ready() -> None:
     await asyncio.sleep(2)
     await bot.change_presence(
         status=discord.Status.online,
-        activity=discord.Game(name="Просмотр фильмов")
+        activity=discord.Game(name="Просмотр фильмов"),
     )
     print(f"Вошёл как {bot.user} (ID: {bot.user.id if bot.user else 'unknown'})")
 
@@ -234,7 +370,6 @@ async def genres(interaction: discord.Interaction) -> None:
         return
 
     lines = [f"`{genre_id}` — {name}" for genre_id, name in sorted(bot.genre_id_to_name.items(), key=lambda x: x[1])]
-    text = "\n".join(lines)
 
     chunks: list[str] = []
     current = ""
@@ -288,14 +423,16 @@ async def movie(interaction: discord.Interaction, genre: str, year: int) -> None
         return
 
     film = results[0]
-    title = film.get("title") or film.get("name") or "Без названия"
+    original_title = film.get("title") or film.get("name") or "Без названия"
+    translated_title = await bot.translate_title_for_display(original_title)
+
     description = film.get("plot_overview") or film.get("overview") or "Описание отсутствует."
-    if len(description) > 900:
-        description = description[:897] + "..."
+    description_ru = await bot.translate_text(description)
+    description_ru = truncate_text(description_ru, 900)
 
     embed = discord.Embed(
-        title=f"🎬 {title}",
-        description=description,
+        title=f"🎬 {translated_title}",
+        description=description_ru,
         color=discord.Color.blurple(),
     )
 
@@ -364,12 +501,13 @@ async def movies(interaction: discord.Interaction, genre: str, year: int, count:
 
     lines = []
     for index, film in enumerate(results, start=1):
-        title = film.get("title") or film.get("name") or "Без названия"
+        original_title = film.get("title") or film.get("name") or "Без названия"
+        translated_title = await bot.translate_title_for_display(original_title)
         film_year = bot.extract_year(film) or year
         rating = bot.score_title(film)
         imdb_id = film.get("imdb_id")
         imdb_part = f" — https://www.imdb.com/title/{imdb_id}/" if imdb_id else ""
-        lines.append(f"{index}. **{title}** ({film_year}) — рейтинг: {rating:g}{imdb_part}")
+        lines.append(f"{index}. **{translated_title}** ({film_year}) — рейтинг: {rating:g}{imdb_part}")
 
     await interaction.followup.send(
         f"Подборка по жанру **{bot.genre_id_to_name.get(genre_id, genre)}**, год **{year}**, регион **{WATCHMODE_REGION}**:\n\n"
