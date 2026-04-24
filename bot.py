@@ -30,32 +30,34 @@ def configure_logging() -> None:
 
 def _find_merge_artifacts() -> list[str]:
     root = Path(__file__).resolve().parent
-    python_files = _project_python_files()
-
     broken_files: list[str] = []
-    for file_path in python_files:
+
+    for file_path in _project_python_files():
         try:
             content = file_path.read_text(encoding="utf-8")
         except OSError:
             continue
         if any(token in content for token in MERGE_TOKENS):
             broken_files.append(str(file_path.relative_to(root)))
+
     return broken_files
 
 
 def _find_syntax_errors() -> list[str]:
     root = Path(__file__).resolve().parent
     broken_files: list[str] = []
+
     for file_path in _project_python_files():
         try:
             content = file_path.read_text(encoding="utf-8")
             ast.parse(content, filename=str(file_path))
-        except (OSError, SyntaxError, IndentationError) as exc:
-            if isinstance(exc, OSError):
-                continue
+        except OSError:
+            continue
+        except (SyntaxError, IndentationError) as exc:
             relative = str(file_path.relative_to(root))
             line_part = f":{exc.lineno}" if exc.lineno else ""
             broken_files.append(f"{relative}{line_part} ({exc.msg})")
+
     return broken_files
 
 
@@ -74,22 +76,11 @@ async def main() -> None:
     syntax_errors = _find_syntax_errors()
     if syntax_errors:
         details = "; ".join(syntax_errors)
-<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
-        warning_text = (
-            "Обнаружены синтаксические ошибки в Python-файлах проекта: "
-            f"{details}. Бот попробует продолжить запуск, но часть cogs может не загрузиться."
-        )
-        logging.getLogger(__name__).warning(warning_text)
-=======
         logging.getLogger(__name__).warning(
             "Обнаружены синтаксические ошибки в Python-файлах проекта: %s. "
             "Бот попробует продолжить запуск, но часть cogs может не загрузиться.",
             details,
-        raise RuntimeError(
-            "Обнаружены синтаксические ошибки в Python-файлах проекта: "
-            f"{details}. Исправьте файл(ы) и перезапустите бота."
         )
->>>>>>> main
 
     if not settings.discord_token:
         raise RuntimeError("Не задан DISCORD_TOKEN")
