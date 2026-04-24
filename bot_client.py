@@ -54,6 +54,7 @@ class MovieBot(commands.Bot):
                 logger.info("Loaded extension: %s", ext)
             except Exception:
                 logger.exception("Failed to load extension: %s", ext)
+            await self.load_extension(ext)
 
         self.tree.on_error = self.on_tree_error
         await self.tree.sync()
