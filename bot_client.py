@@ -12,7 +12,9 @@ from discord.ext import commands
 from config import Settings
 from services.level_service import LevelService
 from services.watchmode_service import WatchmodeService
-codex/refactor-discord-bot-structure-and-add-features-h7krw8
+
+from services.reaction_role_service import ReactionRoleService
+
 from services.reaction_role_service import ReactionRoleService
 
 main
@@ -31,7 +33,9 @@ class MovieBot(commands.Bot):
         self.db: aiosqlite.Connection | None = None
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
- codex/refactor-discord-bot-structure-and-add-features-h7krw8
+
+        self.reaction_roles = ReactionRoleService()
+
         self.reaction_roles = ReactionRoleService()
 
  main
@@ -41,16 +45,18 @@ class MovieBot(commands.Bot):
         self.db = await aiosqlite.connect(self.settings.db_path)
         self.db.row_factory = aiosqlite.Row
         await self.levels.init_db(self.db)
-codex/refactor-discord-bot-structure-and-add-features-h7krw8
+
         await self.reaction_roles.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
         for ext in ("cogs.movies", "cogs.moderation", "cogs.fun", "cogs.levels", "cogs.relay", "cogs.reaction_roles"):
 
+
         await self.watchmode.load_genres(self.session)
 
         for ext in ("cogs.movies", "cogs.moderation", "cogs.fun", "cogs.levels", "cogs.relay"):
-main
+
+
             await self.load_extension(ext)
 
         self.tree.on_error = self.on_tree_error

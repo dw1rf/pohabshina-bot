@@ -21,7 +21,7 @@ class FunCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
 
-codex/refactor-discord-bot-structure-and-add-features-h7krw8
+
     @staticmethod
     def _target_text(interaction: discord.Interaction, user: discord.Member, action: str) -> str:
         if interaction.user.id == user.id:
@@ -30,6 +30,7 @@ codex/refactor-discord-bot-structure-and-add-features-h7krw8
 
 
 main
+
     @app_commands.command(name="самый_красивый", description="Случайно выбрать самого красивого участника")
     @app_commands.checks.cooldown(1, 5)
     async def most_beautiful(self, interaction: discord.Interaction) -> None:
@@ -58,7 +59,7 @@ main
     async def legend(self, interaction: discord.Interaction, user: discord.Member) -> None:
         await interaction.response.send_message(f"✨ Сегодня {user.mention} официально признан легендой сервера")
 
-codex/refactor-discord-bot-structure-and-add-features-h7krw8
+
     @app_commands.command(name="минет", description="Рофл-команда 18+")
     @app_commands.checks.cooldown(1, 5)
     async def minet(self, interaction: discord.Interaction, user: discord.Member) -> None:
@@ -94,8 +95,9 @@ codex/refactor-discord-bot-structure-and-add-features-h7krw8
     async def kill(self, interaction: discord.Interaction, user: discord.Member) -> None:
         await interaction.response.send_message(self._target_text(interaction, user, "виртуально убил(а)"))
 
-=======
+
 main
+
 
 async def setup(bot: MovieBot) -> None:
     await bot.add_cog(FunCog(bot))
