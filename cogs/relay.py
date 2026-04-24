@@ -10,6 +10,7 @@ from bot_client import MovieBot
 from utils.embeds import parse_color, parse_color_strict
 from utils.helpers import attachment_to_file
 from utils.permissions import has_bot_relay_access, has_elevated_permissions
+from utils.permissions import has_bot_relay_access
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class RelayCog(commands.Cog):
         if override is not None:
             return override
 
+    async def _get_target_channel(self) -> discord.TextChannel | None:
         target_id = self.bot.settings.target_channel_id
         if not target_id:
             return None
@@ -58,6 +60,14 @@ class RelayCog(commands.Cog):
         if not isinstance(member, discord.Member):
             return False
         return has_elevated_permissions(member) or has_bot_relay_access(member, self.bot.settings)
+    def _has_access(self, member: discord.Member | discord.User) -> bool:
+        return isinstance(member, discord.Member) and has_bot_relay_access(member, self.bot.settings)
+
+    def _bot_member_in_guild(self, guild: discord.Guild) -> discord.Member | None:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return None
+        return guild.me or guild.get_member(bot_user.id)
 
     def _bot_member_in_guild(self, guild: discord.Guild) -> discord.Member | None:
         bot_user = self.bot.user
@@ -75,6 +85,7 @@ class RelayCog(commands.Cog):
         return True
 
     @app_commands.command(name="say", description="Отправить сообщение/embed от имени бота в выбранный или целевой канал")
+    @app_commands.command(name="say", description="Отправить сообщение от имени бота в целевой канал")
     async def say(
         self,
         interaction: discord.Interaction,
@@ -96,6 +107,7 @@ class RelayCog(commands.Cog):
             return
 
         target = await self._get_target_channel(channel)
+        target = await self._get_target_channel()
         if target is None:
             await interaction.response.send_message("TARGET_CHANNEL_ID не задан или канал недоступен.", ephemeral=True)
             return
@@ -152,6 +164,17 @@ class RelayCog(commands.Cog):
             return
 
         await interaction.response.send_message("✅ Сообщение отправлено.", ephemeral=True)
+        if me is None or not self._has_send_permissions(target, me):
+            await interaction.response.send_message("У бота нет прав отправки сообщений в целевой канал.", ephemeral=True)
+            return
+
+        files = await self._forward_attachments([a for a in (image1, image2, image3) if a is not None])
+        if not text and not files:
+            await interaction.response.send_message("Нужно указать текст или хотя бы одно вложение.", ephemeral=True)
+            return
+
+        await target.send(content=text or None, files=files or None)
+        await interaction.response.send_message("✅ Сообщение отправлено в целевой канал.", ephemeral=True)
 
     @app_commands.command(name="say_embed", description="Отправить embed от имени бота в целевой канал")
     async def say_embed(
@@ -171,20 +194,69 @@ class RelayCog(commands.Cog):
             color=color,
             image=image,
         )
+        if not self._has_access(interaction.user):
+            await interaction.response.send_message("У вас недостаточно прав для /say_embed.", ephemeral=True)
+            return
+
+        target = await self._get_target_channel()
+        if target is None:
+            await interaction.response.send_message("TARGET_CHANNEL_ID не задан или канал недоступен.", ephemeral=True)
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+
+        me = self._bot_member_in_guild(guild)
+        if me is None or not self._has_send_permissions(target, me, needs_embed=True):
+            await interaction.response.send_message("У бота нет прав отправки embed в целевой канал.", ephemeral=True)
+            return
+
+        parsed_color = parse_color_strict(color)
+        if color and parsed_color is None:
+            await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
+            return
+
+        embed = discord.Embed(title=title, description=text, color=parsed_color or parse_color(None))
+
+        files: list[discord.File] = []
+        if image:
+            files = await self._forward_attachments([image])
+            if files:
+                embed.set_image(url=f"attachment://{files[0].filename}")
+
+        await target.send(embed=embed, files=files or None)
+        await interaction.response.send_message("✅ Embed отправлен в целевой канал.", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
             return
-        if not self.bot.settings.control_channel_id or message.channel.id != self.bot.settings.control_channel_id:
+
+        if not self.bot.settings.control_channel_id:
+            return
+
+        if message.channel.id != self.bot.settings.control_channel_id:
             return
         if not self._has_relay_access(message.author):
+
+        if not self._has_access(message.author):
             return
 
         target = await self._get_target_channel()
         if target is None:
             logger.warning("Skip forwarding message %s: target channel unavailable", message.id)
             return
+        if target.id == message.channel.id:
+            logger.warning("CONTROL_CHANNEL_ID and TARGET_CHANNEL_ID are equal (%s). Skip forwarding.", target.id)
+            return
+
+        me = self._bot_member_in_guild(message.guild)
+        if me is None or not self._has_send_permissions(target, me):
+            logger.warning("Bot has no send permissions in target channel %s", target.id)
+            return
+
         if target.id == message.channel.id:
             logger.warning("CONTROL_CHANNEL_ID and TARGET_CHANNEL_ID are equal (%s). Skip forwarding.", target.id)
             return
