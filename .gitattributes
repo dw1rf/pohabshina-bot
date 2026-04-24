@@ -1,0 +1,2 @@
+# Keep entrypoint conflict-free: prefer current branch version during merges.
+bot.py merge=ours
