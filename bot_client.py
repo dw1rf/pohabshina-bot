@@ -12,7 +12,12 @@ from discord.ext import commands
 from config import Settings
 from services.level_service import LevelService
 from services.watchmode_service import WatchmodeService
+
 from services.reaction_role_service import ReactionRoleService
+
+from services.reaction_role_service import ReactionRoleService
+
+main
 
 logger = logging.getLogger(__name__)
 
@@ -28,17 +33,30 @@ class MovieBot(commands.Bot):
         self.db: aiosqlite.Connection | None = None
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
+
         self.reaction_roles = ReactionRoleService()
+
+        self.reaction_roles = ReactionRoleService()
+
+ main
 
     async def setup_hook(self) -> None:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         self.db = await aiosqlite.connect(self.settings.db_path)
         self.db.row_factory = aiosqlite.Row
         await self.levels.init_db(self.db)
+
         await self.reaction_roles.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
         for ext in ("cogs.movies", "cogs.moderation", "cogs.fun", "cogs.levels", "cogs.relay", "cogs.reaction_roles"):
+
+
+        await self.watchmode.load_genres(self.session)
+
+        for ext in ("cogs.movies", "cogs.moderation", "cogs.fun", "cogs.levels", "cogs.relay"):
+
+
             await self.load_extension(ext)
 
         self.tree.on_error = self.on_tree_error
