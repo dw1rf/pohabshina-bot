@@ -31,8 +31,13 @@ class MovieBot(commands.Bot):
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
         self.reaction_roles = ReactionRoleService()
+        self._extensions_bootstrapped = False
 
     async def setup_hook(self) -> None:
+        if self._extensions_bootstrapped:
+            logger.warning("setup_hook called more than once; skip extension bootstrap.")
+            return
+
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         self.db = await aiosqlite.connect(self.settings.db_path)
         self.db.row_factory = aiosqlite.Row
@@ -69,6 +74,7 @@ class MovieBot(commands.Bot):
 
         self.tree.on_error = self.on_tree_error
         await self.tree.sync()
+        self._extensions_bootstrapped = True
         logger.info("Bot started, genres loaded: %s", len(self.watchmode.genre_id_to_name))
 
     async def close(self) -> None:

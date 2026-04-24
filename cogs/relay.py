@@ -119,6 +119,12 @@ class RelayCog(commands.Cog):
             return None
         return guild.me or guild.get_member(bot_user.id)
 
+    def _bot_member_in_guild(self, guild: discord.Guild) -> discord.Member | None:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return None
+        return guild.me or guild.get_member(bot_user.id)
+
     @staticmethod
     def _has_send_permissions(channel: discord.TextChannel, me: discord.Member, needs_embed: bool = False) -> bool:
         perms = channel.permissions_for(me)
@@ -200,6 +206,13 @@ class RelayCog(commands.Cog):
 
             return
 
+        parsed_color = parse_color_strict(color)
+        if color and parsed_color is None:
+            await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
+            return
+
+            return
+
             return
 
             return
@@ -243,6 +256,9 @@ class RelayCog(commands.Cog):
         sent = await self._safe_send(target, content=text or None, embed=embed, files=files)
         if not sent:
             await interaction.response.send_message("Не удалось отправить сообщение. Проверьте права бота и вложения.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("✅ Сообщение отправлено.", ephemeral=True)
             return
 
         await interaction.response.send_message("✅ Сообщение отправлено.", ephemeral=True)
@@ -362,6 +378,11 @@ class RelayCog(commands.Cog):
             return
         if target.id == message.channel.id:
             logger.warning("CONTROL_CHANNEL_ID and TARGET_CHANNEL_ID are equal (%s). Skip forwarding.", target.id)
+            return
+
+        me = self._bot_member_in_guild(message.guild)
+        if me is None or not self._has_send_permissions(target, me):
+            logger.warning("Bot has no send permissions in target channel %s", target.id)
             return
 
         me = self._bot_member_in_guild(message.guild)
