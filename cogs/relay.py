@@ -10,7 +10,10 @@ from bot_client import MovieBot
 from utils.embeds import parse_color, parse_color_strict
 from utils.helpers import attachment_to_file
 from utils.permissions import has_bot_relay_access, has_elevated_permissions
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+=======
 from utils.permissions import has_bot_relay_access
+>>>>>>> main
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +32,10 @@ class RelayCog(commands.Cog):
         if override is not None:
             return override
 
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+=======
     async def _get_target_channel(self) -> discord.TextChannel | None:
+>>>>>>> main
         target_id = self.bot.settings.target_channel_id
         if not target_id:
             return None
@@ -93,6 +99,12 @@ class RelayCog(commands.Cog):
             return None
         return guild.me or guild.get_member(bot_user.id)
 
+    def _bot_member_in_guild(self, guild: discord.Guild) -> discord.Member | None:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return None
+        return guild.me or guild.get_member(bot_user.id)
+
     @staticmethod
     def _has_send_permissions(channel: discord.TextChannel, me: discord.Member, needs_embed: bool = False) -> bool:
         perms = channel.permissions_for(me)
@@ -118,8 +130,11 @@ class RelayCog(commands.Cog):
             return False
 
     @app_commands.command(name="say", description="Отправить сообщение/embed от имени бота в выбранный или целевой канал")
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+=======
     @app_commands.command(name="say", description="Отправить сообщение/embed от имени бота в выбранный или целевой канал")
     @app_commands.command(name="say", description="Отправить сообщение от имени бота в целевой канал")
+>>>>>>> main
     async def say(
         self,
         interaction: discord.Interaction,
@@ -141,7 +156,10 @@ class RelayCog(commands.Cog):
             return
 
         target = await self._get_target_channel(channel)
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+=======
         target = await self._get_target_channel()
+>>>>>>> main
         if target is None:
             await interaction.response.send_message("TARGET_CHANNEL_ID не задан или канал недоступен.", ephemeral=True)
             return
@@ -160,6 +178,10 @@ class RelayCog(commands.Cog):
         parsed_color = parse_color_strict(color)
         if color and parsed_color is None:
             await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+            return
+
+=======
             return
 
             return
@@ -169,6 +191,7 @@ class RelayCog(commands.Cog):
             await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
             return
 
+>>>>>>> main
         files = await self._forward_attachments([a for a in (image1, image2, image3) if a is not None])
         embed: discord.Embed | None = None
 
@@ -200,6 +223,11 @@ class RelayCog(commands.Cog):
         sent = await self._safe_send(target, content=text or None, embed=embed, files=files)
         if not sent:
             await interaction.response.send_message("Не удалось отправить сообщение. Проверьте права бота и вложения.", ephemeral=True)
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+            return
+
+        await interaction.response.send_message("✅ Сообщение отправлено.", ephemeral=True)
+=======
             return
 
         await interaction.response.send_message("✅ Сообщение отправлено.", ephemeral=True)
@@ -228,6 +256,7 @@ class RelayCog(commands.Cog):
 
         await target.send(content=text or None, files=files or None)
         await interaction.response.send_message("✅ Сообщение отправлено в целевой канал.", ephemeral=True)
+>>>>>>> main
 
     @app_commands.command(name="say_embed", description="Отправить embed от имени бота в целевой канал")
     async def say_embed(
@@ -247,6 +276,8 @@ class RelayCog(commands.Cog):
             color=color,
             image=image,
         )
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+=======
         if not self._has_access(interaction.user):
             await interaction.response.send_message("У вас недостаточно прав для /say_embed.", ephemeral=True)
             return
@@ -281,6 +312,7 @@ class RelayCog(commands.Cog):
 
         await target.send(embed=embed, files=files or None)
         await interaction.response.send_message("✅ Embed отправлен в целевой канал.", ephemeral=True)
+>>>>>>> main
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -289,12 +321,16 @@ class RelayCog(commands.Cog):
 
         if not self.bot.settings.control_channel_id:
             return
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+        if not self._has_relay_access(message.author):
+=======
 
         if message.channel.id != self.bot.settings.control_channel_id:
             return
         if not self._has_relay_access(message.author):
 
         if not self._has_access(message.author):
+>>>>>>> main
             return
 
         target = await self._get_target_channel()
@@ -303,6 +339,14 @@ class RelayCog(commands.Cog):
             return
         if target.id == message.channel.id:
             logger.warning("CONTROL_CHANNEL_ID and TARGET_CHANNEL_ID are equal (%s). Skip forwarding.", target.id)
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+            return
+
+        me = self._bot_member_in_guild(message.guild)
+        if me is None or not self._has_send_permissions(target, me):
+            logger.warning("Bot has no send permissions in target channel %s", target.id)
+=======
+>>>>>>> main
             return
 
         me = self._bot_member_in_guild(message.guild)
@@ -310,6 +354,10 @@ class RelayCog(commands.Cog):
             logger.warning("Bot has no send permissions in target channel %s", target.id)
             return
 
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+        sent = await self._safe_send(target, content=message.content or None, files=files)
+        if not sent:
+=======
         me = self._bot_member_in_guild(message.guild)
         if me is None or not self._has_send_permissions(target, me):
             logger.warning("Bot has no send permissions in target channel %s", target.id)
@@ -346,6 +394,7 @@ class RelayCog(commands.Cog):
             await target.send(content=message.content or None, files=files or None)
         except discord.HTTPException as exc:
             logger.exception("Failed to forward message %s: %s", message.id, exc)
+>>>>>>> main
             return
 
         try:

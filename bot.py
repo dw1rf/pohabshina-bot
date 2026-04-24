@@ -75,6 +75,13 @@ async def main() -> None:
     syntax_errors = _find_syntax_errors()
     if syntax_errors:
         details = "; ".join(syntax_errors)
+<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
+        warning_text = (
+            "Обнаружены синтаксические ошибки в Python-файлах проекта: "
+            f"{details}. Бот попробует продолжить запуск, но часть cogs может не загрузиться."
+        )
+        logging.getLogger(__name__).warning(warning_text)
+=======
         logging.getLogger(__name__).warning(
             "Обнаружены синтаксические ошибки в Python-файлах проекта: %s. "
             "Бот попробует продолжить запуск, но часть cogs может не загрузиться.",
@@ -83,6 +90,7 @@ async def main() -> None:
             "Обнаружены синтаксические ошибки в Python-файлах проекта: "
             f"{details}. Исправьте файл(ы) и перезапустите бота."
         )
+>>>>>>> main
 
     if not settings.discord_token:
         raise RuntimeError("Не задан DISCORD_TOKEN")
