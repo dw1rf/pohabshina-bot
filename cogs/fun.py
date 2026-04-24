@@ -21,15 +21,11 @@ class FunCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
 
-
     @staticmethod
     def _target_text(interaction: discord.Interaction, user: discord.Member, action: str) -> str:
         if interaction.user.id == user.id:
             return f"😅 {interaction.user.mention} попытался(ась) {action} себя."
         return f"{interaction.user.mention} {action} {user.mention}"
-
-
-main
 
     @app_commands.command(name="самый_красивый", description="Случайно выбрать самого красивого участника")
     @app_commands.checks.cooldown(1, 5)
@@ -38,10 +34,12 @@ main
         if guild is None:
             await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
             return
+
         members = [m for m in guild.members if not m.bot]
         if not members:
             await interaction.response.send_message("На сервере пока нет подходящих участников для выбора.")
             return
+
         await interaction.response.send_message(f"👑 Самый красивый сегодня — {random.choice(members).mention}")
 
     @app_commands.command(name="обнять", description="Обнять участника")
@@ -58,7 +56,6 @@ main
     @app_commands.checks.cooldown(1, 5)
     async def legend(self, interaction: discord.Interaction, user: discord.Member) -> None:
         await interaction.response.send_message(f"✨ Сегодня {user.mention} официально признан легендой сервера")
-
 
     @app_commands.command(name="минет", description="Рофл-команда 18+")
     @app_commands.checks.cooldown(1, 5)
@@ -94,9 +91,6 @@ main
     @app_commands.checks.cooldown(1, 5)
     async def kill(self, interaction: discord.Interaction, user: discord.Member) -> None:
         await interaction.response.send_message(self._target_text(interaction, user, "виртуально убил(а)"))
-
-
-main
 
 
 async def setup(bot: MovieBot) -> None:
