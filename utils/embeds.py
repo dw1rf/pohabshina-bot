@@ -11,6 +11,7 @@ def parse_color(color: str | None) -> discord.Color:
         return discord.Color(int(raw, 16))
     except ValueError:
         return discord.Color.blurple()
+ codex/refactor-discord-bot-structure-and-add-features-h7krw8
 
 
 def parse_color_strict(color: str | None) -> discord.Color | None:
@@ -23,3 +24,5 @@ def parse_color_strict(color: str | None) -> discord.Color | None:
         return discord.Color(int(raw, 16))
     except ValueError:
         return None
+
+ main
