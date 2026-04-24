@@ -49,6 +49,11 @@ class MovieBot(commands.Bot):
             "cogs.relay",
             "cogs.reaction_roles",
         ):
+            try:
+                await self.load_extension(ext)
+                logger.info("Loaded extension: %s", ext)
+            except Exception:
+                logger.exception("Failed to load extension: %s", ext)
             await self.load_extension(ext)
 
         self.tree.on_error = self.on_tree_error

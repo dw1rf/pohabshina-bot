@@ -75,6 +75,10 @@ async def main() -> None:
     syntax_errors = _find_syntax_errors()
     if syntax_errors:
         details = "; ".join(syntax_errors)
+        logging.getLogger(__name__).warning(
+            "Обнаружены синтаксические ошибки в Python-файлах проекта: %s. "
+            "Бот попробует продолжить запуск, но часть cogs может не загрузиться.",
+            details,
         raise RuntimeError(
             "Обнаружены синтаксические ошибки в Python-файлах проекта: "
             f"{details}. Исправьте файл(ы) и перезапустите бота."
