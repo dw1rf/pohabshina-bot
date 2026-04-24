@@ -6,7 +6,6 @@ from pathlib import Path
 
 from config import load_settings
 
-
 MERGE_TOKENS: tuple[str, ...] = ("<" * 7, "=" * 7, ">" * 7, "codex" + "/refactor")
 
 
