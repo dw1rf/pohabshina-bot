@@ -49,6 +49,16 @@ class MovieBot(commands.Bot):
             "cogs.relay",
             "cogs.reaction_roles",
         ):
+            if ext in self.extensions:
+                logger.warning("Extension already loaded, skip: %s", ext)
+                continue
+            try:
+                await self.load_extension(ext)
+                logger.info("Loaded extension: %s", ext)
+            except commands.ExtensionAlreadyLoaded:
+                logger.warning("Extension already loaded (caught during load): %s", ext)
+            except Exception:
+                logger.exception("Failed to load extension: %s", ext)
             try:
                 await self.load_extension(ext)
                 logger.info("Loaded extension: %s", ext)
