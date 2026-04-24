@@ -75,6 +75,12 @@ class RelayCog(commands.Cog):
             return None
         return guild.me or guild.get_member(bot_user.id)
 
+    def _bot_member_in_guild(self, guild: discord.Guild) -> discord.Member | None:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return None
+        return guild.me or guild.get_member(bot_user.id)
+
     @staticmethod
     def _has_send_permissions(channel: discord.TextChannel, me: discord.Member, needs_embed: bool = False) -> bool:
         perms = channel.permissions_for(me)
@@ -84,6 +90,22 @@ class RelayCog(commands.Cog):
             return False
         return True
 
+    async def _safe_send(
+        self,
+        channel: discord.TextChannel,
+        *,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+        files: list[discord.File] | None = None,
+    ) -> bool:
+        try:
+            await channel.send(content=content, embed=embed, files=files or None)
+            return True
+        except discord.HTTPException as exc:
+            logger.exception("Failed to send message into channel %s: %s", channel.id, exc)
+            return False
+
+    @app_commands.command(name="say", description="Отправить сообщение/embed от имени бота в выбранный или целевой канал")
     @app_commands.command(name="say", description="Отправить сообщение/embed от имени бота в выбранный или целевой канал")
     @app_commands.command(name="say", description="Отправить сообщение от имени бота в целевой канал")
     async def say(
@@ -128,6 +150,13 @@ class RelayCog(commands.Cog):
             await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
             return
 
+            return
+
+        parsed_color = parse_color_strict(color)
+        if color and parsed_color is None:
+            await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
+            return
+
         files = await self._forward_attachments([a for a in (image1, image2, image3) if a is not None])
         embed: discord.Embed | None = None
 
@@ -156,6 +185,12 @@ class RelayCog(commands.Cog):
             await interaction.response.send_message("Укажите текст, embed-поля или вложения.", ephemeral=True)
             return
 
+        sent = await self._safe_send(target, content=text or None, embed=embed, files=files)
+        if not sent:
+            await interaction.response.send_message("Не удалось отправить сообщение. Проверьте права бота и вложения.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("✅ Сообщение отправлено.", ephemeral=True)
         try:
             await target.send(content=text or None, embed=embed, files=files or None)
         except discord.HTTPException as exc:
@@ -257,6 +292,13 @@ class RelayCog(commands.Cog):
             logger.warning("Bot has no send permissions in target channel %s", target.id)
             return
 
+        me = self._bot_member_in_guild(message.guild)
+        if me is None or not self._has_send_permissions(target, me):
+            logger.warning("Bot has no send permissions in target channel %s", target.id)
+            return
+
+        sent = await self._safe_send(target, content=message.content or None, files=files)
+        if not sent:
         if target.id == message.channel.id:
             logger.warning("CONTROL_CHANNEL_ID and TARGET_CHANNEL_ID are equal (%s). Skip forwarding.", target.id)
             return
