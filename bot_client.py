@@ -54,10 +54,8 @@ class MovieBot(commands.Bot):
                 logger.info("Loaded extension: %s", ext)
             except Exception:
                 logger.exception("Failed to load extension: %s", ext)
-<<<<<<< codex/refactor-discord-bot-structure-and-functionality-6ah4o0
-=======
             await self.load_extension(ext)
->>>>>>> main
+
 
         self.tree.on_error = self.on_tree_error
         await self.tree.sync()
