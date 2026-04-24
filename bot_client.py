@@ -33,6 +33,19 @@ class MovieBot(commands.Bot):
         self.reaction_roles = ReactionRoleService()
         self._extensions_bootstrapped = False
 
+    async def _load_or_reload_extension(self, ext: str) -> None:
+        try:
+            if ext in self.extensions:
+                await self.reload_extension(ext)
+                logger.info("Reloaded extension: %s", ext)
+            else:
+                await self.load_extension(ext)
+                logger.info("Loaded extension: %s", ext)
+        except commands.ExtensionAlreadyLoaded:
+            logger.warning("Extension already loaded, skip: %s", ext)
+        except Exception:
+            logger.exception("Failed to bootstrap extension: %s", ext)
+
     async def setup_hook(self) -> None:
         if self._extensions_bootstrapped:
             logger.warning("setup_hook called more than once; skip extension bootstrap.")
@@ -46,6 +59,7 @@ class MovieBot(commands.Bot):
         await self.reaction_roles.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
+        extensions = (
         for ext in (
             "cogs.movies",
             "cogs.moderation",
@@ -53,6 +67,9 @@ class MovieBot(commands.Bot):
             "cogs.levels",
             "cogs.relay",
             "cogs.reaction_roles",
+        )
+        for ext in dict.fromkeys(extensions):
+            await self._load_or_reload_extension(ext)
         ):
             if ext in self.extensions:
                 logger.warning("Extension already loaded, skip: %s", ext)
