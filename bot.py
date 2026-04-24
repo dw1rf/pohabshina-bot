@@ -14,17 +14,14 @@ def configure_logging() -> None:
     )
 
 
-def validate_required_settings(discord_token: str, watchmode_api_key: str) -> None:
-    if not discord_token:
-        raise RuntimeError("Не задан DISCORD_TOKEN")
-    if not watchmode_api_key:
-        raise RuntimeError("Не задан WATCHMODE_API_KEY")
-
-
 async def main() -> None:
     configure_logging()
     settings = load_settings()
-    validate_required_settings(settings.discord_token, settings.watchmode_api_key)
+
+    if not settings.discord_token:
+        raise RuntimeError("Не задан DISCORD_TOKEN")
+    if not settings.watchmode_api_key:
+        raise RuntimeError("Не задан WATCHMODE_API_KEY")
 
     bot = MovieBot(settings)
     async with bot:
