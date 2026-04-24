@@ -165,9 +165,24 @@ class ReactionRolesCog(commands.Cog):
             await interaction.response.send_message("message_id должен быть числом.", ephemeral=True)
             return
 
+        msg_id = int(message_id)
+        target = await self._resolve_config_message(guild, msg_id)
+        if not target:
+            await interaction.response.send_message("Сообщение reaction roles не найдено в конфигурации.", ephemeral=True)
+            return
+
+        _, message = target
         key = emoji_key(emoji)
-        await self.bot.reaction_roles.delete_binding(self.bot.db, guild.id, int(message_id), key)
-        await interaction.response.send_message(f"✅ Связка для {emoji} удалена.", ephemeral=True)
+        deleted = await self.bot.reaction_roles.delete_binding(self.bot.db, guild.id, msg_id, key)
+        if deleted:
+            try:
+                await message.clear_reaction(emoji)
+            except (discord.HTTPException, discord.Forbidden):
+                logger.warning("Failed to clear reaction %s from message %s", emoji, msg_id)
+            await interaction.response.send_message(f"✅ Связка для {emoji} удалена.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("Для этого emoji нет связки на указанном сообщении.", ephemeral=True)
 
     async def list_messages(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
@@ -210,8 +225,11 @@ class ReactionRolesCog(commands.Cog):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 pass
 
-        await self.bot.reaction_roles.delete_message(self.bot.db, guild.id, int(message_id))
-        await interaction.response.send_message("✅ Конфигурация reaction roles удалена.", ephemeral=True)
+        deleted = await self.bot.reaction_roles.delete_message(self.bot.db, guild.id, int(message_id))
+        if deleted:
+            await interaction.response.send_message("✅ Конфигурация reaction roles удалена.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Такого message_id нет в reaction roles.", ephemeral=True)
 
     async def _handle_raw_reaction(self, payload: discord.RawReactionActionEvent, add_role: bool) -> None:
         if payload.guild_id is None or payload.user_id == (self.bot.user.id if self.bot.user else None):
