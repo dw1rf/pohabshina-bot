@@ -9,6 +9,7 @@ from discord.ext import commands
 from bot_client import MovieBot
 from utils.embeds import parse_color, parse_color_strict
 from utils.helpers import attachment_to_file
+from utils.permissions import has_bot_relay_access, has_elevated_permissions
 from utils.permissions import has_bot_relay_access
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,10 @@ class RelayCog(commands.Cog):
             logger.warning("TARGET_CHANNEL_ID is not configured. /say, /say_embed and forwarding are disabled.")
         if not self.bot.settings.control_channel_id:
             logger.warning("CONTROL_CHANNEL_ID is not configured. control-channel forwarding is disabled.")
+
+    async def _get_target_channel(self, override: discord.TextChannel | None = None) -> discord.TextChannel | None:
+        if override is not None:
+            return override
 
     async def _get_target_channel(self) -> discord.TextChannel | None:
         target_id = self.bot.settings.target_channel_id
@@ -48,8 +53,21 @@ class RelayCog(commands.Cog):
                 logger.exception("Failed to download attachment %s (%s)", attachment.filename, exc)
         return files
 
+    def _has_relay_access(self, member: discord.Member | discord.User) -> bool:
+        return isinstance(member, discord.Member) and has_bot_relay_access(member, self.bot.settings)
+
+    def _has_say_access(self, member: discord.Member | discord.User) -> bool:
+        if not isinstance(member, discord.Member):
+            return False
+        return has_elevated_permissions(member) or has_bot_relay_access(member, self.bot.settings)
     def _has_access(self, member: discord.Member | discord.User) -> bool:
         return isinstance(member, discord.Member) and has_bot_relay_access(member, self.bot.settings)
+
+    def _bot_member_in_guild(self, guild: discord.Guild) -> discord.Member | None:
+        bot_user = self.bot.user
+        if bot_user is None:
+            return None
+        return guild.me or guild.get_member(bot_user.id)
 
     def _bot_member_in_guild(self, guild: discord.Guild) -> discord.Member | None:
         bot_user = self.bot.user
@@ -66,19 +84,29 @@ class RelayCog(commands.Cog):
             return False
         return True
 
+    @app_commands.command(name="say", description="Отправить сообщение/embed от имени бота в выбранный или целевой канал")
     @app_commands.command(name="say", description="Отправить сообщение от имени бота в целевой канал")
     async def say(
         self,
         interaction: discord.Interaction,
         text: str | None = None,
+        channel: discord.TextChannel | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        color: str | None = None,
+        image: discord.Attachment | None = None,
+        thumbnail: discord.Attachment | None = None,
+        footer: str | None = None,
+        author: str | None = None,
         image1: discord.Attachment | None = None,
         image2: discord.Attachment | None = None,
         image3: discord.Attachment | None = None,
     ) -> None:
-        if not self._has_access(interaction.user):
+        if not self._has_say_access(interaction.user):
             await interaction.response.send_message("У вас недостаточно прав для /say.", ephemeral=True)
             return
 
+        target = await self._get_target_channel(channel)
         target = await self._get_target_channel()
         if target is None:
             await interaction.response.send_message("TARGET_CHANNEL_ID не задан или канал недоступен.", ephemeral=True)
@@ -90,6 +118,52 @@ class RelayCog(commands.Cog):
             return
 
         me = self._bot_member_in_guild(guild)
+        use_embed = any((title, description, color, image, thumbnail, footer, author))
+        if me is None or not self._has_send_permissions(target, me, needs_embed=use_embed):
+            await interaction.response.send_message("У бота нет прав отправки сообщений/embed в указанный канал.", ephemeral=True)
+            return
+
+        parsed_color = parse_color_strict(color)
+        if color and parsed_color is None:
+            await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
+            return
+
+        files = await self._forward_attachments([a for a in (image1, image2, image3) if a is not None])
+        embed: discord.Embed | None = None
+
+        if use_embed:
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=parsed_color or parse_color(None),
+            )
+
+            embed_files = await self._forward_attachments([a for a in (image, thumbnail) if a is not None])
+            files.extend(embed_files)
+
+            if image and embed_files:
+                embed.set_image(url=f"attachment://{embed_files[0].filename}")
+            if thumbnail:
+                thumb_index = 1 if image else 0
+                if len(embed_files) > thumb_index:
+                    embed.set_thumbnail(url=f"attachment://{embed_files[thumb_index].filename}")
+            if footer:
+                embed.set_footer(text=footer)
+            if author:
+                embed.set_author(name=author)
+
+        if not text and not embed and not files:
+            await interaction.response.send_message("Укажите текст, embed-поля или вложения.", ephemeral=True)
+            return
+
+        try:
+            await target.send(content=text or None, embed=embed, files=files or None)
+        except discord.HTTPException as exc:
+            logger.exception("Failed to send /say payload into channel %s: %s", target.id, exc)
+            await interaction.response.send_message("Не удалось отправить сообщение. Проверьте права бота и вложения.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("✅ Сообщение отправлено.", ephemeral=True)
         if me is None or not self._has_send_permissions(target, me):
             await interaction.response.send_message("У бота нет прав отправки сообщений в целевой канал.", ephemeral=True)
             return
@@ -111,6 +185,15 @@ class RelayCog(commands.Cog):
         image: discord.Attachment | None = None,
         color: str | None = None,
     ) -> None:
+        await self.say(
+            interaction=interaction,
+            text=None,
+            channel=None,
+            title=title,
+            description=text,
+            color=color,
+            image=image,
+        )
         if not self._has_access(interaction.user):
             await interaction.response.send_message("У вас недостаточно прав для /say_embed.", ephemeral=True)
             return
@@ -156,6 +239,7 @@ class RelayCog(commands.Cog):
 
         if message.channel.id != self.bot.settings.control_channel_id:
             return
+        if not self._has_relay_access(message.author):
 
         if not self._has_access(message.author):
             return
@@ -163,6 +247,14 @@ class RelayCog(commands.Cog):
         target = await self._get_target_channel()
         if target is None:
             logger.warning("Skip forwarding message %s: target channel unavailable", message.id)
+            return
+        if target.id == message.channel.id:
+            logger.warning("CONTROL_CHANNEL_ID and TARGET_CHANNEL_ID are equal (%s). Skip forwarding.", target.id)
+            return
+
+        me = self._bot_member_in_guild(message.guild)
+        if me is None or not self._has_send_permissions(target, me):
+            logger.warning("Bot has no send permissions in target channel %s", target.id)
             return
 
         if target.id == message.channel.id:

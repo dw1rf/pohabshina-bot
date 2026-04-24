@@ -71,16 +71,17 @@ class ReactionRoleService:
         )
         await db.commit()
 
-    async def delete_message(self, db: aiosqlite.Connection, guild_id: int, message_id: int) -> None:
+    async def delete_message(self, db: aiosqlite.Connection, guild_id: int, message_id: int) -> int:
         await db.execute(
             "DELETE FROM reaction_role_bindings WHERE guild_id = ? AND message_id = ?",
             (guild_id, message_id),
         )
-        await db.execute(
+        cursor = await db.execute(
             "DELETE FROM reaction_role_messages WHERE guild_id = ? AND message_id = ?",
             (guild_id, message_id),
         )
         await db.commit()
+        return int(cursor.rowcount or 0)
 
     async def get_message(self, db: aiosqlite.Connection, guild_id: int, message_id: int) -> ReactionRoleMessage | None:
         cursor = await db.execute(
@@ -144,12 +145,13 @@ class ReactionRoleService:
         )
         await db.commit()
 
-    async def delete_binding(self, db: aiosqlite.Connection, guild_id: int, message_id: int, emoji_key: str) -> None:
-        await db.execute(
+    async def delete_binding(self, db: aiosqlite.Connection, guild_id: int, message_id: int, emoji_key: str) -> int:
+        cursor = await db.execute(
             "DELETE FROM reaction_role_bindings WHERE guild_id = ? AND message_id = ? AND emoji_key = ?",
             (guild_id, message_id, emoji_key),
         )
         await db.commit()
+        return int(cursor.rowcount or 0)
 
     async def list_bindings(self, db: aiosqlite.Connection, guild_id: int, message_id: int) -> list[ReactionRoleBinding]:
         cursor = await db.execute(
