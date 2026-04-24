@@ -13,7 +13,6 @@ def parse_color(color: str | None) -> discord.Color:
         return discord.Color.blurple()
 
 
-
 def parse_color_strict(color: str | None) -> discord.Color | None:
     if not color:
         return None
@@ -24,6 +23,3 @@ def parse_color_strict(color: str | None) -> discord.Color | None:
         return discord.Color(int(raw, 16))
     except ValueError:
         return None
-
-
- main
