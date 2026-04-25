@@ -60,7 +60,6 @@ class MovieBot(commands.Bot):
         await self.watchmode.load_genres(self.session)
 
         extensions = (
-        for ext in (
             "cogs.movies",
             "cogs.moderation",
             "cogs.fun",
@@ -68,25 +67,8 @@ class MovieBot(commands.Bot):
             "cogs.relay",
             "cogs.reaction_roles",
         )
-        for ext in dict.fromkeys(extensions):
+        for ext in extensions:
             await self._load_or_reload_extension(ext)
-        ):
-            if ext in self.extensions:
-                logger.warning("Extension already loaded, skip: %s", ext)
-                continue
-            try:
-                await self.load_extension(ext)
-                logger.info("Loaded extension: %s", ext)
-            except commands.ExtensionAlreadyLoaded:
-                logger.warning("Extension already loaded (caught during load): %s", ext)
-            except Exception:
-                logger.exception("Failed to load extension: %s", ext)
-            try:
-                await self.load_extension(ext)
-                logger.info("Loaded extension: %s", ext)
-            except Exception:
-                logger.exception("Failed to load extension: %s", ext)
-            await self.load_extension(ext)
 
 
         self.tree.on_error = self.on_tree_error
