@@ -60,11 +60,14 @@ class RelayCog(commands.Cog):
         channel: discord.TextChannel | discord.Thread,
         me: discord.Member,
         needs_embed: bool = False,
+        needs_attach: bool = False,
     ) -> bool:
         perms = channel.permissions_for(me)
         if not perms.send_messages:
             return False
         if needs_embed and not perms.embed_links:
+            return False
+        if needs_attach and not perms.attach_files:
             return False
         return True
 
@@ -123,11 +126,12 @@ class RelayCog(commands.Cog):
     async def say_embed(
         self,
         interaction: discord.Interaction,
+        description: str,
         title: str | None = None,
-        description: str | None = None,
-        text: str | None = None,
         color: str | None = None,
+        image: discord.Attachment | None = None,
         image_url: str | None = None,
+        thumbnail: discord.Attachment | None = None,
         thumbnail_url: str | None = None,
         footer: str | None = None,
     ) -> None:
@@ -146,8 +150,12 @@ class RelayCog(commands.Cog):
             return
 
         me = self._bot_member_in_guild(guild)
-        if me is None or not self._has_send_permissions(channel, me, needs_embed=True):
-            await interaction.response.send_message("У бота нет прав отправки embed в текущий канал.", ephemeral=True)
+        needs_attach = image is not None or thumbnail is not None
+        if me is None or not self._has_send_permissions(channel, me, needs_embed=True, needs_attach=needs_attach):
+            await interaction.response.send_message(
+                "У бота нет прав отправки embed/файлов в текущий канал.",
+                ephemeral=True,
+            )
             return
 
         parsed_color = parse_color_strict(color)
@@ -155,24 +163,40 @@ class RelayCog(commands.Cog):
             await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
             return
 
-        embed_description = description or text
-        if not embed_description:
-            await interaction.response.send_message("Для /say_embed нужно указать description или text.", ephemeral=True)
-            return
+        files: list[discord.File] = []
 
         embed = discord.Embed(
             title=title,
-            description=embed_description,
+            description=description,
             color=parsed_color or discord.Color.blurple(),
         )
-        if image_url:
+
+        if image is not None:
+            image_file = await attachment_to_file(image)
+            if image_file is None:
+                await interaction.response.send_message("Не удалось обработать файл изображения.", ephemeral=True)
+                return
+
+            files.append(image_file)
+            embed.set_image(url=f"attachment://{image_file.filename}")
+        elif image_url:
             embed.set_image(url=image_url)
-        if thumbnail_url:
+
+        if thumbnail is not None:
+            thumbnail_file = await attachment_to_file(thumbnail)
+            if thumbnail_file is None:
+                await interaction.response.send_message("Не удалось обработать файл миниатюры.", ephemeral=True)
+                return
+
+            files.append(thumbnail_file)
+            embed.set_thumbnail(url=f"attachment://{thumbnail_file.filename}")
+        elif thumbnail_url:
             embed.set_thumbnail(url=thumbnail_url)
+
         if footer:
             embed.set_footer(text=footer)
 
-        sent = await self._safe_send(channel, embed=embed)
+        sent = await self._safe_send(channel, embed=embed, files=files)
         if not sent:
             await interaction.response.send_message("Не удалось отправить embed. Проверьте права бота и параметры.", ephemeral=True)
             return
