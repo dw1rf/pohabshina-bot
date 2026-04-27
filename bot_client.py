@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import UTC, datetime
+from pathlib import Path
 
 import aiohttp
 import aiosqlite
@@ -11,6 +13,7 @@ from discord.ext import commands
 
 from config import Settings
 from services.level_service import LevelService
+from services.reputation_service import ReputationService
 from services.reaction_role_service import ReactionRoleService
 from services.watchmode_service import WatchmodeService
 
@@ -30,6 +33,7 @@ class MovieBot(commands.Bot):
 
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
+        self.reputation = ReputationService()
         self.reaction_roles = ReactionRoleService()
         self._extensions_bootstrapped = False
 
@@ -52,10 +56,12 @@ class MovieBot(commands.Bot):
             return
 
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+        self._prepare_database_path()
         self.db = await aiosqlite.connect(self.settings.db_path)
         self.db.row_factory = aiosqlite.Row
 
         await self.levels.init_db(self.db)
+        await self.reputation.init_rep_db(self.db)
         await self.reaction_roles.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
@@ -66,6 +72,7 @@ class MovieBot(commands.Bot):
             "cogs.levels",
             "cogs.relay",
             "cogs.reaction_roles",
+            "cogs.reputation",
         )
         for ext in extensions:
             await self._load_or_reload_extension(ext)
@@ -75,6 +82,19 @@ class MovieBot(commands.Bot):
         await self.tree.sync()
         self._extensions_bootstrapped = True
         logger.info("Bot started, genres loaded: %s", len(self.watchmode.genre_id_to_name))
+
+    def _prepare_database_path(self) -> None:
+        db_path = Path(self.settings.db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        old_default = Path("bot_data.sqlite3")
+        if (
+            self.settings.db_path == "data/bot.db"
+            and not db_path.exists()
+            and old_default.exists()
+        ):
+            shutil.move(str(old_default), str(db_path))
+            logger.info("Migrated legacy SQLite DB from %s to %s", old_default, db_path)
 
     async def close(self) -> None:
         if self.session and not self.session.closed:
