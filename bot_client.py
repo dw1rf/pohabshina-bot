@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import UTC, datetime
+from pathlib import Path
 
 import aiohttp
 import aiosqlite
@@ -52,6 +54,7 @@ class MovieBot(commands.Bot):
             return
 
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+        self._prepare_database_path()
         self.db = await aiosqlite.connect(self.settings.db_path)
         self.db.row_factory = aiosqlite.Row
 
@@ -75,6 +78,19 @@ class MovieBot(commands.Bot):
         await self.tree.sync()
         self._extensions_bootstrapped = True
         logger.info("Bot started, genres loaded: %s", len(self.watchmode.genre_id_to_name))
+
+    def _prepare_database_path(self) -> None:
+        db_path = Path(self.settings.db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        old_default = Path("bot_data.sqlite3")
+        if (
+            self.settings.db_path == "data/bot.db"
+            and not db_path.exists()
+            and old_default.exists()
+        ):
+            shutil.move(str(old_default), str(db_path))
+            logger.info("Migrated legacy SQLite DB from %s to %s", old_default, db_path)
 
     async def close(self) -> None:
         if self.session and not self.session.closed:

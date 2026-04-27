@@ -67,5 +67,5 @@ def load_settings() -> Settings:
         translate_source_lang=os.getenv("TRANSLATE_SOURCE_LANG", "auto").strip() or "auto",
         translate_target_lang=os.getenv("TRANSLATE_TARGET_LANG", "ru").strip() or "ru",
         show_both_titles=_parse_bool(os.getenv("SHOW_BOTH_TITLES", "1"), default=True),
-        db_path=os.getenv("SQLITE_PATH", "bot_data.sqlite3"),
+        db_path=os.getenv("SQLITE_PATH", "data/bot.db"),
     )

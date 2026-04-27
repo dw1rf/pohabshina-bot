@@ -19,6 +19,90 @@ class ModerationCog(commands.Cog):
     def _guild(interaction: discord.Interaction) -> discord.Guild | None:
         return interaction.guild
 
+    @app_commands.command(name="rules", description="Показать правила сервера")
+    @app_commands.default_permissions(manage_guild=True)
+    async def rules(self, interaction: discord.Interaction) -> None:
+        guild = self._guild(interaction)
+        if guild is None:
+            await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.manage_guild and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("У вас нет прав для этой команды.", ephemeral=True)
+            return
+
+        first_embed = discord.Embed(
+            title="📜 Правила сервера",
+            description="Пожалуйста, ознакомьтесь с правилами перед общением.",
+            color=discord.Color.blue(),
+        )
+        first_embed.add_field(
+            name="1. Уважайте участников и администрацию.",
+            value="Оскорбления, травля, унижение, токсичность, угрозы.\n**Наказание:** мут 1 час → мут 6 часов → бан.",
+            inline=False,
+        )
+        first_embed.add_field(
+            name="2. Не устраивайте провокации и конфликты.",
+            value="Ссоры ради ссоры, разжигание конфликтов, намеренный вывод людей на агрессию.\n**Наказание:** мут 1 час → мут 1 день → бан.",
+            inline=False,
+        )
+        first_embed.add_field(
+            name="3. Спам, флуд, капс и оффтоп запрещены.",
+            value="Засорение чата сообщениями, эмодзи, пингами, бессмысленным текстом.\n**Наказание:** удаление сообщений + мут 1 час → 12 часов → 1 день.",
+            inline=False,
+        )
+        first_embed.add_field(
+            name="4. Реклама и подозрительные ссылки запрещены.",
+            value="Реклама серверов, каналов, услуг, ботов, а также скам и фишинг.\n**Наказание:** бан без предупреждения.",
+            inline=False,
+        )
+        first_embed.add_field(
+            name="5. Запрещён 18+, шок-контент и запрещённый материал.",
+            value="Исключение: NSFW-каналы, если такой контент разрешён их тематикой.\nЗапрещённый или незаконный контент запрещён везде.\n**Наказание:** удаление контента + мут 1 день / за тяжёлые случаи — бан сразу.",
+            inline=False,
+        )
+        first_embed.add_field(
+            name="6. Не публикуйте чужие личные данные.",
+            value="Сливы переписок, фото, номеров, адресов, аккаунтов без согласия.\n**Наказание:** бан без предупреждения.",
+            inline=False,
+        )
+
+        second_embed = discord.Embed(
+            title="📜 Правила сервера (продолжение)",
+            color=discord.Color.blue(),
+        )
+        second_embed.add_field(
+            name="7. Соблюдайте тематику каналов.",
+            value="Пишите туда, где это уместно.\n**Наказание:** предупреждение → мут 3 часа → мут 12 часов.",
+            inline=False,
+        )
+        second_embed.add_field(
+            name="8. Обход наказаний запрещён.",
+            value="Твинки, заход с других аккаунтов после мута/бана.\n**Наказание:** перманентный бан всех аккаунтов.",
+            inline=False,
+        )
+        second_embed.add_field(
+            name="9. Голосовые каналы.",
+            value="Крики, помехи, саундпад, музыка без согласования, намеренное мешательство.\n**Наказание:** отключение от канала / мут в войсе 1 час → 12 часов → 1 день.",
+            inline=False,
+        )
+        second_embed.add_field(
+            name="10. Ники, аватары и статусы должны быть адекватными.",
+            value="Оскорбительные, провокационные, NSFW или вводящие в заблуждение профили запрещены.\n**Наказание:** требование сменить → мут 12 часов / кик / бан при отказе.",
+            inline=False,
+        )
+        second_embed.add_field(
+            name="11. Решения администрации обязательны к соблюдению.",
+            value="Обсуждение наказаний — только в ЛС с администрацией.\n**Наказание:** мут 12 часов → 1 день.",
+            inline=False,
+        )
+        second_embed.add_field(
+            name="Важно",
+            value="Администрация вправе пропустить этапы наказаний и выдать сразу мут/бан, если нарушение серьёзное.",
+            inline=False,
+        )
+
+        await interaction.response.send_message(embeds=[first_embed, second_embed])
+
     @app_commands.command(name="warn", description="Выдать предупреждение пользователю")
     async def warn(self, interaction: discord.Interaction, user: discord.Member, reason: str) -> None:
         guild = self._guild(interaction)
