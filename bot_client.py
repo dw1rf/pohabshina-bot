@@ -13,6 +13,7 @@ from discord.ext import commands
 
 from config import Settings
 from services.level_service import LevelService
+from services.reputation_service import ReputationService
 from services.reaction_role_service import ReactionRoleService
 from services.watchmode_service import WatchmodeService
 
@@ -32,6 +33,7 @@ class MovieBot(commands.Bot):
 
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
+        self.reputation = ReputationService()
         self.reaction_roles = ReactionRoleService()
         self._extensions_bootstrapped = False
 
@@ -59,6 +61,7 @@ class MovieBot(commands.Bot):
         self.db.row_factory = aiosqlite.Row
 
         await self.levels.init_db(self.db)
+        await self.reputation.init_rep_db(self.db)
         await self.reaction_roles.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
@@ -69,6 +72,7 @@ class MovieBot(commands.Bot):
             "cogs.levels",
             "cogs.relay",
             "cogs.reaction_roles",
+            "cogs.reputation",
         )
         for ext in extensions:
             await self._load_or_reload_extension(ext)
