@@ -46,6 +46,10 @@ class Settings:
     db_path: str
     rep_announce_channel_id: int
     rep_plus_emoji: str
+    support_category_id: int
+    support_admin_role_id: int
+    support_log_channel_id: int
+    shop_requests_to_support: bool
     level_cooldown_seconds: int = 15
     min_message_length: int = 2
     max_level: int = 300
@@ -72,4 +76,8 @@ def load_settings() -> Settings:
         db_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         rep_announce_channel_id=int(os.getenv("REP_ANNOUNCE_CHANNEL_ID", "0") or 0),
         rep_plus_emoji=os.getenv("REP_PLUS_EMOJI", "👍").strip() or "👍",
+        support_category_id=int(os.getenv("SUPPORT_CATEGORY_ID", "0") or 0),
+        support_admin_role_id=int(os.getenv("SUPPORT_ADMIN_ROLE_ID", "0") or 0),
+        support_log_channel_id=int(os.getenv("SUPPORT_LOG_CHANNEL_ID", "0") or 0),
+        shop_requests_to_support=_parse_bool(os.getenv("SHOP_REQUESTS_TO_SUPPORT", "true"), default=True),
     )
