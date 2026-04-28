@@ -15,6 +15,7 @@ from config import Settings
 from services.level_service import LevelService
 from services.reputation_service import ReputationService
 from services.reaction_role_service import ReactionRoleService
+from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class MovieBot(commands.Bot):
         self.levels = LevelService(settings)
         self.reputation = ReputationService()
         self.reaction_roles = ReactionRoleService()
+        self.support_tickets = SupportTicketService()
         self._extensions_bootstrapped = False
 
     async def _load_or_reload_extension(self, ext: str) -> None:
@@ -63,6 +65,7 @@ class MovieBot(commands.Bot):
         await self.levels.init_db(self.db)
         await self.reputation.init_rep_db(self.db)
         await self.reaction_roles.init_db(self.db)
+        await self.support_tickets.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
         extensions = (
@@ -73,6 +76,7 @@ class MovieBot(commands.Bot):
             "cogs.relay",
             "cogs.reaction_roles",
             "cogs.reputation",
+            "cogs.support_shop",
         )
         for ext in extensions:
             await self._load_or_reload_extension(ext)
