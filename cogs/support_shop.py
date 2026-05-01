@@ -30,10 +30,10 @@ SHOP_SERVICES: tuple[ShopService, ...] = (
     ShopService("remove_warn", "Снятие 1 предупреждения в Discord", "20 ₽"),
     ShopService("unique_role", "Уникальная роль", "100 ₽", "Индивидуальное название и градиент. Без прав управления, не поднимает в списке участников."),
     ShopService("custom_badge", "Персональный значок возле ника", "50 ₽", "Кастомный эмодзи с любым персонажем или формой."),
-    ShopService("mc_private_cinema", "Приватный вход в МК-кинотеатр", "150 ₽", "Личный доступ к Minecraft-серверу, синхронизированному с Discord, показ кино в Minecraft.", coming_soon=True),
-    ShopService("mc_priority_show", "Показ вашего фильма/сериала/аниме в Minecraft без очереди", "50 ₽", "Трансляция без очереди + упоминание в официальной афише.", coming_soon=True),
-    ShopService("mc_op", "Права /op", "1 500 ₽", "Полный доступ к Minecraft-серверу «пахабщины»: креатив/выживание, телепортация, безлимитные показы. Выдаётся только после проверки и согласования с администрацией.", coming_soon=True),
-    ShopService("discord_commands_pack", "Пак из 10 индивидуальных команд для Discord-сервера", "цена обсуждается", coming_soon=True),
+    ShopService("mc_private_cinema", "Приватный вход в МК-кинотеатр", "150 ₽", "Личный доступ к Minecraft-серверу, синхронизированному с Discord, показ кино в Minecraft."),
+    ShopService("mc_priority_show", "Показ вашего фильма/сериала/аниме в Minecraft без очереди", "50 ₽", "Трансляция без очереди + упоминание в официальной афише."),
+    ShopService("mc_op", "Права /op", "1 500 ₽", "Полный доступ к Minecraft-серверу «пахабщины»: креатив/выживание, телепортация, безлимитные показы. Выдаётся только после проверки и согласования с администрацией."),
+    ShopService("discord_commands_pack", "Пак из 10 индивидуальных команд для Discord-сервера", "49 ₽"),
 )
 
 SERVICES_BY_KEY = {service.key: service for service in SHOP_SERVICES}
@@ -112,16 +112,11 @@ class SupportShopCog(commands.Cog):
         )
 
     def _build_shop_embed(self) -> discord.Embed:
-        available = [service for service in SHOP_SERVICES if not service.coming_soon]
-        coming_soon = [service for service in SHOP_SERVICES if service.coming_soon]
-
         available_lines: list[str] = []
-        for service in available:
-            available_lines.append(f"• {service.title} — {service.price}")
+        for service in SHOP_SERVICES:
+            available_lines.append(f"• {service.title} — {service.price} • Доступно")
             if service.description:
                 available_lines.append(indent_lines(service.description, 2))
-
-        coming_soon_lines = [f"• {service.title} — {service.price}" for service in coming_soon]
 
         how_to_order = "\n".join(
             [
@@ -149,7 +144,6 @@ class SupportShopCog(commands.Cog):
             color=discord.Color.gold(),
         )
         embed.add_field(name="Доступно", value=indent_lines("\n".join(available_lines), 2), inline=False)
-        embed.add_field(name="Скоро", value=indent_lines("\n".join(coming_soon_lines), 2), inline=False)
         embed.add_field(name="Как оплатить и заказать", value=indent_lines(how_to_order, 2), inline=False)
         embed.add_field(name="Важно", value=indent_lines(important, 2), inline=False)
         return embed
