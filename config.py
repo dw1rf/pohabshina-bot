@@ -44,8 +44,6 @@ class Settings:
     translate_target_lang: str
     show_both_titles: bool
     db_path: str
-    rep_announce_channel_id: int
-    rep_plus_emoji: str
     support_category_id: int
     support_admin_role_id: int
     support_log_channel_id: int
@@ -74,8 +72,6 @@ def load_settings() -> Settings:
         translate_target_lang=os.getenv("TRANSLATE_TARGET_LANG", "ru").strip() or "ru",
         show_both_titles=_parse_bool(os.getenv("SHOW_BOTH_TITLES", "1"), default=True),
         db_path=os.getenv("SQLITE_PATH", "data/bot.db"),
-        rep_announce_channel_id=int(os.getenv("REP_ANNOUNCE_CHANNEL_ID", "0") or 0),
-        rep_plus_emoji=os.getenv("REP_PLUS_EMOJI", "👍").strip() or "👍",
         support_category_id=int(os.getenv("SUPPORT_CATEGORY_ID", "0") or 0),
         support_admin_role_id=int(os.getenv("SUPPORT_ADMIN_ROLE_ID", "0") or 0),
         support_log_channel_id=int(os.getenv("SUPPORT_LOG_CHANNEL_ID", "0") or 0),
