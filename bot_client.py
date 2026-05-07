@@ -79,6 +79,7 @@ class MovieBot(commands.Bot):
             "cogs.reaction_roles",
             "cogs.reputation",
             "cogs.support_shop",
+            "cogs.weddings",
         )
         for ext in extensions:
             await self._load_or_reload_extension(ext)
