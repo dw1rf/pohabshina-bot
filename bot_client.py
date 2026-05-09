@@ -18,6 +18,7 @@ from services.reputation_service import ReputationService
 from services.reaction_role_service import ReactionRoleService
 from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
+from services.social_game_service import SocialGameService
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ class MovieBot(commands.Bot):
         self.reputation = ReputationService()
         self.reaction_roles = ReactionRoleService()
         self.support_tickets = SupportTicketService()
+        self.social_games = SocialGameService()
         self._extensions_bootstrapped = False
         self._mc_server = JavaServer("5.83.140.210", 25780)
 
@@ -68,6 +70,7 @@ class MovieBot(commands.Bot):
         await self.reputation.init_rep_db(self.db)
         await self.reaction_roles.init_db(self.db)
         await self.support_tickets.init_db(self.db)
+        await self.social_games.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
         extensions = (
@@ -80,6 +83,12 @@ class MovieBot(commands.Bot):
             "cogs.reputation",
             "cogs.support_shop",
             "cogs.weddings",
+            "cogs.settings",
+            "cogs.roleplay",
+            "cogs.pets",
+            "cogs.story",
+            "cogs.social_profile",
+            "cogs.club",
         )
         for ext in extensions:
             await self._load_or_reload_extension(ext)
