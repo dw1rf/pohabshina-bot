@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 
 import discord
@@ -11,6 +12,14 @@ from bot_client import MovieBot
 from cogs.social_game_content import RP_ACTIONS
 
 logger = logging.getLogger(__name__)
+COMMAND_NAME_OVERRIDES = {
+    "пристегнуть_наручниками" "_к_кровати": "cuff_bed",
+}
+COMMAND_NAME_RE = re.compile(r"^[\w-]+$", re.UNICODE)
+
+
+def _is_valid_command_name(name: str) -> bool:
+    return isinstance(name, str) and 1 <= len(name) <= 32 and name == name.lower() and " " not in name and bool(COMMAND_NAME_RE.fullmatch(name))
 
 
 class RoleplayCog(commands.Cog):
@@ -18,11 +27,15 @@ class RoleplayCog(commands.Cog):
         self.bot = bot
         self._target_cooldowns: dict[tuple[int, int, str], datetime] = {}
         self._registered: list[str] = []
-        for name, payload in RP_ACTIONS.items():
+        for action_key, payload in RP_ACTIONS.items():
+            name = COMMAND_NAME_OVERRIDES.get(action_key, action_key)
+            if not _is_valid_command_name(name):
+                logger.warning("Skip invalid RP command name: %r", name)
+                continue
             if self.bot.tree.get_command(name) is not None:
                 logger.warning("RP command /%s skipped because it already exists", name)
                 continue
-            command = app_commands.Command(name=name, description=f"RP-действие: {payload['label']}", callback=self._make_callback(name))
+            command = app_commands.Command(name=name, description=f"RP-действие: {payload['label']}"[:100], callback=self._make_callback(action_key))
             self.bot.tree.add_command(command)
             self._registered.append(name)
 

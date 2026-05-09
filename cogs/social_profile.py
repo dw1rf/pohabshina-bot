@@ -255,8 +255,48 @@ class SocialProfileCog(commands.Cog):
                 (message.guild.id, message.author.id, message.guild.id, message.author.id),
             )
         week = self.bot.social_games.week_start(datetime.now(UTC))
-        await self.bot.db.execute("INSERT OR IGNORE INTO user_weekly_style_stats (guild_id, user_id, week_start) VALUES (?, ?, ?)", (message.guild.id, message.author.id, week))
-        await self.bot.db.execute("UPDATE user_weekly_style_stats SET message_count=message_count+1, avg_length=((avg_length*(message_count-1))+?)/message_count, emoji_count=emoji_count+?, question_count=question_count+?, words_json=?, sample=? WHERE guild_id=? AND user_id=? AND week_start=?", (len(content), emoji_count, question_count, json.dumps(dict(word_counts), ensure_ascii=False), sample or "", message.guild.id, message.author.id, week))
+        await self.bot.db.execute(
+            """
+            INSERT OR IGNORE INTO user_weekly_style_stats (
+                guild_id,
+                user_id,
+                week_start,
+                message_count,
+                avg_length,
+                emoji_count,
+                question_count,
+                words_json,
+                sample
+            )
+            VALUES (?, ?, ?, 0, 0, 0, 0, '{}', '')
+            """,
+            (message.guild.id, message.author.id, week),
+        )
+        await self.bot.db.execute(
+            """
+            UPDATE user_weekly_style_stats
+            SET
+                avg_length = (
+                    (COALESCE(avg_length, 0) * COALESCE(message_count, 0)) + ?
+                ) * 1.0 / (COALESCE(message_count, 0) + 1),
+                message_count = COALESCE(message_count, 0) + 1,
+                emoji_count = COALESCE(emoji_count, 0) + ?,
+                question_count = COALESCE(question_count, 0) + ?,
+                words_json = ?,
+                sample = ?
+            WHERE guild_id = ? AND user_id = ? AND week_start = ?
+            """,
+            (
+                len(content),
+                emoji_count,
+                question_count,
+                json.dumps(dict(word_counts), ensure_ascii=False) or "{}",
+                sample or "",
+                message.guild.id,
+                message.author.id,
+                week,
+            ),
+        )
         for mentioned in mentions:
             if not await self._is_opted_out(message.guild.id, mentioned.id):
                 await self._edge(message.guild.id, message.author.id, mentioned.id, mention=True)
@@ -451,4 +491,18 @@ class SocialProfileCog(commands.Cog):
 
 
 async def setup(bot: MovieBot) -> None:
+    if bot.db is not None:
+        await bot.db.execute(
+            """
+            UPDATE user_weekly_style_stats
+            SET
+                message_count = COALESCE(message_count, 0),
+                avg_length = COALESCE(avg_length, 0),
+                emoji_count = COALESCE(emoji_count, 0),
+                question_count = COALESCE(question_count, 0),
+                words_json = COALESCE(words_json, '{}'),
+                sample = COALESCE(sample, '')
+            """
+        )
+        await bot.db.commit()
     await bot.add_cog(SocialProfileCog(bot))
