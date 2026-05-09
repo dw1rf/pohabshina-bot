@@ -575,6 +575,7 @@ class SupportShopCog(commands.Cog):
         try:
             await ticket_channel.send(content=user.mention, embed=instruction_embed)
             await ticket_channel.send(embed=embed)
+            await ticket_channel.send(content=user.mention, embed=instruction_embed)
         except (discord.Forbidden, discord.HTTPException):
             logger.exception("Failed to send service request into ticket channel %s", ticket_channel.id)
             await self._safe_reply(interaction, "Не удалось отправить заявку в тикет. Попробуйте позже.")
