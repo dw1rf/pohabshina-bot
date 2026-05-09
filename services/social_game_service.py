@@ -48,7 +48,7 @@ class SocialGameService:
                 match_opt_in INTEGER NOT NULL DEFAULT 1,
                 clone_opt_in INTEGER NOT NULL DEFAULT 0,
                 clone_public INTEGER NOT NULL DEFAULT 0,
-                store_message_samples INTEGER NOT NULL DEFAULT 1,
+                store_message_samples INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
@@ -308,7 +308,7 @@ class SocialGameService:
                 "analytics_enabled": True,
                 "public_profile": True,
                 "matchmaking_enabled": True,
-                "store_message_samples": True,
+                "store_message_samples": False,
                 "clone_opt_in": False,
                 "clone_public": False,
             }
@@ -387,7 +387,14 @@ class SocialGameService:
             await db.execute(f"DELETE FROM {table} WHERE guild_id = ? AND {column} = ?", (guild_id, user_id))
         await db.execute("DELETE FROM user_social_edges WHERE guild_id = ? AND other_user_id = ?", (guild_id, user_id))
         await db.execute("DELETE FROM social_edges WHERE guild_id = ? AND target_user_id = ?", (guild_id, user_id))
-        await db.commit()
+        await self.set_profile_privacy(
+            db,
+            guild_id,
+            user_id,
+            analytics_enabled=False,
+            public_profile=False,
+            matchmaking_enabled=False,
+        )
 
     async def forget_user(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> None:
         for table, column in (

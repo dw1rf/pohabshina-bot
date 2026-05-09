@@ -50,10 +50,31 @@ class RoleplayCog(commands.Cog):
                 await interaction.response.send_message("Эта RP-команда требует второго участника.", ephemeral=True)
                 return
 
+            if self.bot.db is None:
+                await interaction.response.send_message("База данных временно недоступна.", ephemeral=True)
+                return
+
             payload = RP_ACTIONS[action_key]
             nsfw = bool(payload["nsfw"])
-            if nsfw and not getattr(interaction.channel, "is_nsfw", lambda: False)():
-                await interaction.response.send_message("Эта команда доступна только в NSFW-канале.", ephemeral=True)
+            guild_settings = await self.bot.social_games.ensure_guild_settings(self.bot.db, interaction.guild.id)
+            if nsfw:
+                if not bool(guild_settings["nsfw_rp_enabled"]):
+                    await interaction.response.send_message("NSFW RP выключен администратором сервера.", ephemeral=True)
+                    return
+                if not getattr(interaction.channel, "is_nsfw", lambda: False)():
+                    await interaction.response.send_message("Эта команда доступна только в NSFW-канале.", ephemeral=True)
+                    return
+
+            missing_consent = []
+            for member in (author, target):
+                if not await self.bot.social_games.has_rp_consent(self.bot.db, interaction.guild.id, member.id, nsfw=nsfw):
+                    missing_consent.append(member.mention)
+            if missing_consent:
+                await interaction.response.send_message(
+                    "Для RP-команды нужно согласие обоих участников через /rp_consent. "
+                    f"Не хватает согласия: {', '.join(missing_consent)}.",
+                    ephemeral=True,
+                )
                 return
 
             cd_key = (interaction.guild.id, target.id, action_key)
@@ -84,8 +105,11 @@ class RoleplayCog(commands.Cog):
         if interaction.guild is None or self.bot.db is None:
             await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
             return
+        if nsfw and not sfw:
+            await interaction.response.send_message("NSFW-согласие требует включённого обычного RP-согласия.", ephemeral=True)
+            return
         await self.bot.social_games.set_rp_consent(self.bot.db, interaction.guild.id, interaction.user.id, sfw=sfw, nsfw=nsfw)
-        await interaction.response.send_message("Настройка сохранена, но RP-действия теперь публикуются сразу без кнопок подтверждения.", ephemeral=True)
+        await interaction.response.send_message("RP-согласие сохранено. Для NSFW-сцен также нужны NSFW-канал, настройка сервера и согласие второго участника.", ephemeral=True)
 
 
 async def setup(bot: MovieBot) -> None:

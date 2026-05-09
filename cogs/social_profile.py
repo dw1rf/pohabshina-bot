@@ -156,7 +156,7 @@ class ProfileDeleteConfirmView(discord.ui.View):
             await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
             return
         await self.cog.bot.social_games.forget_profile_data(self.cog.bot.db, interaction.guild.id, interaction.user.id)
-        embed = discord.Embed(title="Данные очищены", description="Данные профиля очищены. Новые сообщения начнут собирать профиль заново.", color=discord.Color.green())
+        embed = discord.Embed(title="Данные удалены", description="Данные профиля удалены, аналитика отключена.", color=discord.Color.green())
         await interaction.response.edit_message(embed=embed, view=None)
 
     @discord.ui.button(label="Отмена", style=discord.ButtonStyle.secondary)
@@ -173,7 +173,12 @@ class SocialProfileCog(commands.Cog):
         if message.guild is None or message.author.bot or self.bot.db is None:
             return
         try:
+            settings = await self.bot.social_games.ensure_guild_settings(self.bot.db, message.guild.id)
+            if not settings["profile_analytics_enabled"]:
+                return
             privacy = await self.bot.social_games.get_privacy_settings(self.bot.db, message.guild.id, message.author.id)
+            if not privacy["analytics_enabled"]:
+                return
             await self._aggregate_message(message, bool(privacy["store_message_samples"]))
         except (aiosqlite.Error, discord.HTTPException):
             logger.exception("Failed to aggregate profile activity for guild=%s user=%s", message.guild.id, message.author.id)
@@ -253,8 +258,9 @@ class SocialProfileCog(commands.Cog):
         await self.bot.db.execute("INSERT OR IGNORE INTO user_weekly_style_stats (guild_id, user_id, week_start) VALUES (?, ?, ?)", (message.guild.id, message.author.id, week))
         await self.bot.db.execute("UPDATE user_weekly_style_stats SET message_count=message_count+1, avg_length=((avg_length*(message_count-1))+?)/message_count, emoji_count=emoji_count+?, question_count=question_count+?, words_json=?, sample=? WHERE guild_id=? AND user_id=? AND week_start=?", (len(content), emoji_count, question_count, json.dumps(dict(word_counts), ensure_ascii=False), sample or "", message.guild.id, message.author.id, week))
         for mentioned in mentions:
-            await self._edge(message.guild.id, message.author.id, mentioned.id, mention=True)
-        if reply_target_id:
+            if not await self._is_opted_out(message.guild.id, mentioned.id):
+                await self._edge(message.guild.id, message.author.id, mentioned.id, mention=True)
+        if reply_target_id and not await self._is_opted_out(message.guild.id, reply_target_id):
             await self._edge(message.guild.id, message.author.id, reply_target_id, reply=True)
         await self.bot.db.commit()
 
@@ -317,9 +323,10 @@ class SocialProfileCog(commands.Cog):
         return discord.Embed(
             title="Что хранит бот",
             description=(
-                "Бот использует сообщения сервера для развлекательной статистики: активность, стиль общения, частые темы и связи по ответам/упоминаниям. "
-                "Полная история сообщений не показывается. Samples ограничены 100 короткими очищенными фразами на пользователя. "
-                "Вложения, файлы, DM и сообщения ботов не анализируются. Очистить накопленные данные можно через /forget_me."
+                "Аналитика профиля включена по умолчанию как развлекательная функция. "
+                "Бот хранит агрегаты: количество сообщений, среднюю длину, эмодзи, вопросы, частотные слова, активные каналы и связи/ответы/упоминания. "
+                "Samples ограничены 100 короткими очищенными фразами на пользователя и сохраняются только если включён store_message_samples. "
+                "Вложения, файлы, DM и сообщения ботов не анализируются. /forget_me удаляет данные и отключает дальнейший сбор."
             ),
             color=discord.Color.blurple(),
         )
@@ -328,7 +335,10 @@ class SocialProfileCog(commands.Cog):
         if interaction.guild is None or self.bot.db is None:
             await interaction.response.send_message("Только на сервере.", ephemeral=True)
             return
-        embed = await self._profile_embed(interaction.guild, interaction.user) or self._not_enough_embed(interaction.user)
+        if await self._is_opted_out(interaction.guild.id, interaction.user.id):
+            embed = discord.Embed(title="Профиль отключён", description="Аналитика профиля отключена. /forget_me уже удаляет данные и оставляет opt-out.", color=discord.Color.light_grey())
+        else:
+            embed = await self._profile_embed(interaction.guild, interaction.user) or self._not_enough_embed(interaction.user)
         view = ProfileMenuView(self, interaction.user.id)
         if interaction.response.is_done():
             await interaction.edit_original_response(embed=embed, view=view)
@@ -370,7 +380,8 @@ class SocialProfileCog(commands.Cog):
             """
             SELECT e.other_user_id, e.reply_count, e.mention_count, e.shared_channel_count
             FROM user_social_edges e
-            WHERE e.guild_id=? AND e.user_id=?
+            LEFT JOIN user_privacy_settings p ON p.guild_id = e.guild_id AND p.user_id = e.other_user_id
+            WHERE e.guild_id=? AND e.user_id=? AND COALESCE(p.analytics_enabled, 1) = 1
             ORDER BY (e.reply_count*2 + e.mention_count + e.shared_channel_count) DESC
             LIMIT 5
             """,
@@ -403,6 +414,9 @@ class SocialProfileCog(commands.Cog):
         if interaction.guild is None or self.bot.db is None:
             await interaction.response.send_message("Только на сервере.", ephemeral=True)
             return
+        if await self._is_opted_out(interaction.guild.id, interaction.user.id):
+            await interaction.response.send_message("Аналитика профиля отключена.", ephemeral=True)
+            return
         embed = await self._profile_embed(interaction.guild, interaction.user) or self._not_enough_embed(interaction.user)
         await interaction.response.send_message(embed=embed, view=ProfileMenuView(self, interaction.user.id), ephemeral=True)
 
@@ -414,6 +428,9 @@ class SocialProfileCog(commands.Cog):
         if user.bot:
             await interaction.response.send_message("Профили ботов не анализируются.", ephemeral=True)
             return
+        if await self._is_opted_out(interaction.guild.id, user.id):
+            await interaction.response.send_message("Пользователь отключил аналитику профиля.", ephemeral=True)
+            return
         embed = await self._profile_embed(interaction.guild, user)
         if not embed:
             await interaction.response.send_message("Недостаточно данных для профиля. Нужно больше сообщений на сервере.", ephemeral=True)
@@ -424,13 +441,13 @@ class SocialProfileCog(commands.Cog):
     async def privacy(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(embed=self.privacy_embed(), ephemeral=True)
 
-    @app_commands.command(name="forget_me", description="Очистить данные профиля")
+    @app_commands.command(name="forget_me", description="Удалить данные профиля и отключить аналитику")
     async def forget_me(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or self.bot.db is None:
             await interaction.response.send_message("Только на сервере.", ephemeral=True)
             return
         await self.bot.social_games.forget_profile_data(self.bot.db, interaction.guild.id, interaction.user.id)
-        await interaction.response.send_message("Данные профиля очищены. Новые сообщения начнут собирать профиль заново.", ephemeral=True)
+        await interaction.response.send_message("Данные профиля удалены, аналитика отключена.", ephemeral=True)
 
 
 async def setup(bot: MovieBot) -> None:

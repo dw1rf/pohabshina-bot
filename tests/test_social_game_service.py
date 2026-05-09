@@ -25,15 +25,15 @@ class SocialGameServiceTests(unittest.TestCase):
             self.assertTrue(default_privacy["analytics_enabled"])
             self.assertTrue(default_privacy["public_profile"])
             self.assertTrue(default_privacy["matchmaking_enabled"])
-            self.assertTrue(default_privacy["store_message_samples"])
+            self.assertFalse(default_privacy["store_message_samples"])
             await service.set_rp_consent(db, 1, 42, sfw=True, nsfw=False)
             self.assertTrue(await service.has_rp_consent(db, 1, 42, nsfw=False))
             self.assertFalse(await service.has_rp_consent(db, 1, 42, nsfw=True))
             await service.forget_profile_data(db, 1, 42)
             privacy_after = await service.get_privacy_settings(db, 1, 42)
-            self.assertTrue(privacy_after["analytics_enabled"])
-            self.assertTrue(privacy_after["public_profile"])
-            self.assertTrue(privacy_after["matchmaking_enabled"])
+            self.assertFalse(privacy_after["analytics_enabled"])
+            self.assertFalse(privacy_after["public_profile"])
+            self.assertFalse(privacy_after["matchmaking_enabled"])
             await db.close()
 
         asyncio.run(scenario())
@@ -75,6 +75,9 @@ class SocialGameServiceTests(unittest.TestCase):
         self.assertIn("unban", SERVICE_INSTRUCTIONS)
         self.assertTrue(any(payload["nsfw"] for payload in RP_ACTIONS.values()))
         self.assertTrue(all("text" in payload for payload in RP_ACTIONS.values()))
+        self.assertIn("прижать_к_стенке", RP_ACTIONS)
+        self.assertIn("французский_поцелуй", RP_ACTIONS)
+        self.assertTrue(all("text" in payload and "label" in payload for payload in RP_ACTIONS.values()))
 
 
 if __name__ == "__main__":
