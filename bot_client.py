@@ -18,6 +18,7 @@ from services.reputation_service import ReputationService
 from services.reaction_role_service import ReactionRoleService
 from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
+from services.social_game_service import SocialGameService
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +39,58 @@ class MovieBot(commands.Bot):
         self.reputation = ReputationService()
         self.reaction_roles = ReactionRoleService()
         self.support_tickets = SupportTicketService()
+        self.social_games = SocialGameService()
         self._extensions_bootstrapped = False
         self._mc_server = JavaServer("5.83.140.210", 25780)
 
-    async def _load_or_reload_extension(self, ext: str) -> None:
-        try:
-            if ext in self.extensions:
-                await self.reload_extension(ext)
-                logger.info("Reloaded extension: %s", ext)
+    async def load_cogs(self) -> list[str]:
+        cogs_dir = Path(__file__).resolve().parent / "cogs"
+
+        if not cogs_dir.exists():
+            logger.error("Cogs directory not found: %s", cogs_dir)
+            return []
+
+        loaded: list[str] = []
+        failed: list[str] = []
+        skipped: list[str] = []
+
+        for file_path in sorted(cogs_dir.glob("*.py")):
+            if file_path.name.startswith("_"):
+                continue
+
+            extension = f"cogs.{file_path.stem}"
+            try:
+                module_source = file_path.read_text(encoding="utf-8")
+            except OSError:
+                failed.append(extension)
+                logger.exception("Failed to read extension file: %s", file_path)
+                continue
+
+            if "async def setup" not in module_source:
+                skipped.append(extension)
+                logger.info("Extension has no async setup, skip: %s", extension)
+                continue
+
+            try:
+                if extension in self.extensions:
+                    skipped.append(extension)
+                    logger.info("Extension already loaded, skip: %s", extension)
+                    continue
+                await self.load_extension(extension)
+            except Exception:
+                failed.append(extension)
+                logger.exception("Failed to load extension: %s", extension)
             else:
-                await self.load_extension(ext)
-                logger.info("Loaded extension: %s", ext)
-        except commands.ExtensionAlreadyLoaded:
-            logger.warning("Extension already loaded, skip: %s", ext)
-        except Exception:
-            logger.exception("Failed to bootstrap extension: %s", ext)
+                loaded.append(extension)
+                logger.info("Loaded extension: %s", extension)
+
+        logger.info("Cogs loaded: %s", loaded)
+        if skipped:
+            logger.info("Cogs skipped: %s", skipped)
+        if failed:
+            logger.warning("Cogs failed to load: %s", failed)
+
+        return loaded
 
     async def setup_hook(self) -> None:
         if self._extensions_bootstrapped:
@@ -68,27 +106,15 @@ class MovieBot(commands.Bot):
         await self.reputation.init_rep_db(self.db)
         await self.reaction_roles.init_db(self.db)
         await self.support_tickets.init_db(self.db)
+        await self.social_games.init_db(self.db)
         await self.watchmode.load_genres(self.session)
 
-        extensions = (
-            "cogs.movies",
-            "cogs.moderation",
-            "cogs.fun",
-            "cogs.levels",
-            "cogs.relay",
-            "cogs.reaction_roles",
-            "cogs.reputation",
-            "cogs.support_shop",
-            "cogs.weddings",
-        )
-        for ext in extensions:
-            await self._load_or_reload_extension(ext)
-
+        loaded_cogs = await self.load_cogs()
 
         self.tree.on_error = self.on_tree_error
         await self.tree.sync()
         self._extensions_bootstrapped = True
-        logger.info("Bot started, genres loaded: %s", len(self.watchmode.genre_id_to_name))
+        logger.info("Bot started, genres loaded: %s, cogs loaded: %s", len(self.watchmode.genre_id_to_name), loaded_cogs)
 
     def _prepare_database_path(self) -> None:
         db_path = Path(self.settings.db_path)
