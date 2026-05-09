@@ -11,6 +11,7 @@ from discord.ext import commands
 from bot_client import MovieBot
 from services.support_ticket_service import SupportTicket
 from utils.embed_format import indent_lines
+from cogs.social_game_content import SERVICE_INSTRUCTIONS, SHOP_DEFAULT_INSTRUCTION
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +333,9 @@ class SupportShopCog(commands.Cog):
         role = guild.get_role(self.bot.settings.support_admin_role_id)
         return role
 
+    def _service_instruction(self, service_key: str) -> str:
+        return SERVICE_INSTRUCTIONS.get(service_key, SHOP_DEFAULT_INSTRUCTION)
+
     async def _send_ticket_intro(self, channel: discord.TextChannel, user: discord.Member) -> None:
         embed = discord.Embed(
             title="Обращение создано",
@@ -527,14 +531,26 @@ class SupportShopCog(commands.Cog):
             inline=False,
         )
 
+        instruction = self._service_instruction(service.key)
+        instruction_embed = discord.Embed(
+            title="Инструкция по услуге",
+            description=instruction,
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(UTC),
+        )
+
         try:
             await ticket_channel.send(embed=embed)
+            await ticket_channel.send(content=user.mention, embed=instruction_embed)
         except (discord.Forbidden, discord.HTTPException):
             logger.exception("Failed to send service request into ticket channel %s", ticket_channel.id)
             await self._safe_reply(interaction, "Не удалось отправить заявку в тикет. Попробуйте позже.")
             return
 
-        await self._safe_reply(interaction, f"Заявка создана: {ticket_channel.mention}")
+        await self._safe_reply(
+            interaction,
+            f"Заявка создана: {ticket_channel.mention}\n\n**Инструкция:** {instruction}",
+        )
 
     @app_commands.command(name="support_panel", description="Отправить панель технической поддержки")
     @app_commands.default_permissions(manage_guild=True)
