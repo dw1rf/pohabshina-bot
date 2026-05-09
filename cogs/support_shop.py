@@ -11,7 +11,7 @@ from discord.ext import commands
 from bot_client import MovieBot
 from services.support_ticket_service import SupportTicket
 from utils.embed_format import indent_lines
-from cogs.social_game_content import SERVICE_INSTRUCTIONS, SHOP_DEFAULT_INSTRUCTION
+from cogs.social_game_content import SERVICE_INSTRUCTIONS, SHOP_DEFAULT_INSTRUCTION, SHOP_URL
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,8 @@ class ShopService:
     price: str
     description: str | None = None
     coming_soon: bool = False
+    emoji: str | None = None
+    button_label: str | None = None
 
 
 SHOP_SERVICES: tuple[ShopService, ...] = (
@@ -40,6 +42,7 @@ SHOP_SERVICES: tuple[ShopService, ...] = (
     ShopService("mc_priority_show", "Показ вашего фильма/сериала/аниме в Minecraft без очереди", "50 ₽", "Трансляция без очереди + упоминание в официальной афише."),
     ShopService("mc_op", "Права /op", "1 500 ₽", "Полный доступ к Minecraft-серверу «пахабщины»: креатив/выживание, телепортация, безлимитные показы. Выдаётся только после проверки и согласования с администрацией."),
     ShopService("discord_commands_pack", "Пак из 10 индивидуальных команд для Discord-сервера", "49 ₽"),
+    ShopService("role_upgrade", "⬆️ Повышение существующей роли на 1 ступень", "49 ₽", "Повышение вашей текущей роли на следующую доступную ступень.", emoji="⬆️"),
 )
 
 SERVICES_BY_KEY = {service.key: service for service in SHOP_SERVICES}
@@ -205,13 +208,15 @@ class ShopPanelView(discord.ui.View):
         self.cog = cog
         options = [
             discord.SelectOption(
-                label=service.title[:100],
+                label=(service.button_label or service.title)[:100],
                 value=service.key,
                 description=(f"{service.price} • {'СКОРО' if service.coming_soon else 'Доступно'}")[:100],
+                emoji=service.emoji,
             )
             for service in SHOP_SERVICES
         ]
         self.add_item(ShopServiceSelect(cog, options))
+        self.add_item(discord.ui.Button(label="🌐 Открыть сайт магазина", style=discord.ButtonStyle.link, url=SHOP_URL))
 
 
 class ShopServiceSelect(discord.ui.Select):
@@ -280,7 +285,7 @@ class SupportShopCog(commands.Cog):
 
         embed = discord.Embed(
             title="Услуги Discord",
-            description="Выберите услугу ниже. После выбора бот создаст приватное обращение, где администрация уточнит детали и выдаст реквизиты.",
+            description=f"Выберите услугу ниже или откройте сайт магазина: {SHOP_URL}",
             color=discord.Color.gold(),
         )
         embed.add_field(name="Доступно", value=indent_lines("\n".join(available_lines), 2), inline=False)
@@ -540,6 +545,7 @@ class SupportShopCog(commands.Cog):
         )
 
         try:
+            await ticket_channel.send(content=user.mention, embed=instruction_embed)
             await ticket_channel.send(embed=embed)
             await ticket_channel.send(content=user.mention, embed=instruction_embed)
         except (discord.Forbidden, discord.HTTPException):

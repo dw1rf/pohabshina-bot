@@ -49,6 +49,7 @@ class SocialGameService:
                 clone_opt_in INTEGER NOT NULL DEFAULT 0,
                 clone_public INTEGER NOT NULL DEFAULT 0,
                 store_message_samples INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
             );
@@ -58,16 +59,31 @@ class SocialGameService:
                 user_id INTEGER NOT NULL,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 total_length INTEGER NOT NULL DEFAULT 0,
+                avg_length REAL NOT NULL DEFAULT 0,
                 emoji_count INTEGER NOT NULL DEFAULT 0,
                 question_count INTEGER NOT NULL DEFAULT 0,
                 mention_count INTEGER NOT NULL DEFAULT 0,
                 reply_count INTEGER NOT NULL DEFAULT 0,
                 words_json TEXT NOT NULL DEFAULT '{}',
                 channels_json TEXT NOT NULL DEFAULT '{}',
+                activity_days_json TEXT NOT NULL DEFAULT '{}',
+                mentions_json TEXT NOT NULL DEFAULT '{}',
+                reply_targets_json TEXT NOT NULL DEFAULT '{}',
                 sample_short TEXT NOT NULL DEFAULT '',
                 sample_recent TEXT NOT NULL DEFAULT '',
+                last_seen_at TEXT,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_message_samples (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                content_sample TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, message_id)
             );
 
             CREATE TABLE IF NOT EXISTS user_weekly_style_stats (
@@ -143,6 +159,18 @@ class SocialGameService:
                 nsfw INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS social_edges (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                target_user_id INTEGER NOT NULL,
+                weight INTEGER NOT NULL DEFAULT 0,
+                replies_count INTEGER NOT NULL DEFAULT 0,
+                mentions_count INTEGER NOT NULL DEFAULT 0,
+                same_thread_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, target_user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS club_profiles (
                 guild_id INTEGER NOT NULL,
                 owner_id INTEGER NOT NULL,
@@ -171,7 +199,51 @@ class SocialGameService:
             """
         )
         await self._migrate_privacy_defaults(db)
+        await self._migrate_activity_schema(db)
         await db.commit()
+
+    async def _migrate_activity_schema(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(user_activity_aggregates)")
+        columns = {str(row["name"] if isinstance(row, aiosqlite.Row) else row[1]) for row in await cursor.fetchall()}
+        migrations = {
+            "avg_length": "ALTER TABLE user_activity_aggregates ADD COLUMN avg_length REAL NOT NULL DEFAULT 0",
+            "activity_days_json": "ALTER TABLE user_activity_aggregates ADD COLUMN activity_days_json TEXT NOT NULL DEFAULT '{}'",
+            "mentions_json": "ALTER TABLE user_activity_aggregates ADD COLUMN mentions_json TEXT NOT NULL DEFAULT '{}'",
+            "reply_targets_json": "ALTER TABLE user_activity_aggregates ADD COLUMN reply_targets_json TEXT NOT NULL DEFAULT '{}'",
+            "last_seen_at": "ALTER TABLE user_activity_aggregates ADD COLUMN last_seen_at TEXT",
+        }
+        for column, sql in migrations.items():
+            if column not in columns:
+                await db.execute(sql)
+        cursor = await db.execute("PRAGMA table_info(user_privacy_settings)")
+        privacy_columns = {str(row["name"] if isinstance(row, aiosqlite.Row) else row[1]) for row in await cursor.fetchall()}
+        if "created_at" not in privacy_columns:
+            await db.execute("ALTER TABLE user_privacy_settings ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS user_message_samples (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                content_sample TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, message_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS social_edges (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                target_user_id INTEGER NOT NULL,
+                weight INTEGER NOT NULL DEFAULT 0,
+                replies_count INTEGER NOT NULL DEFAULT 0,
+                mentions_count INTEGER NOT NULL DEFAULT 0,
+                same_thread_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, target_user_id)
+            );
+            """
+        )
 
     async def _migrate_privacy_defaults(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(user_privacy_settings)")
@@ -214,10 +286,10 @@ class SocialGameService:
         await db.execute(
             """
             INSERT OR IGNORE INTO user_privacy_settings
-                (guild_id, user_id, analytics_enabled, public_profile, matchmaking_enabled, profile_opt_in, profile_public, match_opt_in, updated_at)
-            VALUES (?, ?, 1, 1, 1, 1, 1, 1, ?)
+                (guild_id, user_id, analytics_enabled, public_profile, matchmaking_enabled, profile_opt_in, profile_public, match_opt_in, created_at, updated_at)
+            VALUES (?, ?, 1, 1, 1, 1, 1, 1, ?, ?)
             """,
-            (guild_id, user_id, utcnow_iso()),
+            (guild_id, user_id, utcnow_iso(), utcnow_iso()),
         )
         await db.commit()
         cur = await db.execute("SELECT * FROM user_privacy_settings WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
@@ -307,11 +379,14 @@ class SocialGameService:
     async def forget_profile_data(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> None:
         for table, column in (
             ("user_activity_aggregates", "user_id"),
+            ("user_message_samples", "user_id"),
             ("user_weekly_style_stats", "user_id"),
             ("user_social_edges", "user_id"),
+            ("social_edges", "user_id"),
         ):
             await db.execute(f"DELETE FROM {table} WHERE guild_id = ? AND {column} = ?", (guild_id, user_id))
         await db.execute("DELETE FROM user_social_edges WHERE guild_id = ? AND other_user_id = ?", (guild_id, user_id))
+        await db.execute("DELETE FROM social_edges WHERE guild_id = ? AND target_user_id = ?", (guild_id, user_id))
         await self.set_profile_privacy(
             db,
             guild_id,
@@ -324,12 +399,14 @@ class SocialGameService:
     async def forget_user(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> None:
         for table, column in (
             ("user_privacy_settings", "user_id"), ("rp_consent_settings", "user_id"),
-            ("user_activity_aggregates", "user_id"), ("user_weekly_style_stats", "user_id"),
-            ("user_social_edges", "user_id"), ("pets", "owner_id"), ("pet_actions", "owner_id"),
+            ("user_activity_aggregates", "user_id"), ("user_message_samples", "user_id"),
+            ("user_weekly_style_stats", "user_id"), ("user_social_edges", "user_id"),
+            ("social_edges", "user_id"), ("pets", "owner_id"), ("pet_actions", "owner_id"),
             ("story_progress", "user_id"), ("club_profiles", "owner_id"), ("club_transactions", "owner_id"),
         ):
             await db.execute(f"DELETE FROM {table} WHERE guild_id = ? AND {column} = ?", (guild_id, user_id))
         await db.execute("DELETE FROM user_social_edges WHERE guild_id = ? AND other_user_id = ?", (guild_id, user_id))
+        await db.execute("DELETE FROM social_edges WHERE guild_id = ? AND target_user_id = ?", (guild_id, user_id))
         await db.commit()
 
     async def set_rp_consent(self, db: aiosqlite.Connection, guild_id: int, user_id: int, *, sfw: bool | None = None, nsfw: bool | None = None) -> None:
