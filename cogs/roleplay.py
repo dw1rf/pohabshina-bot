@@ -64,16 +64,13 @@ class RoleplayCog(commands.Cog):
                 return
             self._target_cooldowns[cd_key] = now + timedelta(seconds=60)
 
-            description = f"{author.mention} выполняет RP-действие **{payload['label']}** для {target.mention}."
+            description = f"{author.mention} и {target.mention}: {payload['text']}"
             if comment:
-                description += f"\n\nКомментарий: {discord.utils.escape_markdown(comment)[:300]}"
+                description += f"\n\n{discord.utils.escape_markdown(comment)[:300]}"
             embed = discord.Embed(
-                title="RP-действие",
                 description=description,
                 color=discord.Color.purple() if nsfw else discord.Color.blurple(),
-                timestamp=now,
             )
-            embed.set_footer(text="Игровое RP-действие. Используйте команды ответственно.")
             await interaction.response.send_message(embed=embed)
         except Exception:
             logger.exception("RP action failed: guild=%s action=%s", getattr(interaction.guild, "id", None), action_key)

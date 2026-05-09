@@ -301,7 +301,7 @@ class SupportShopCog(commands.Cog):
         minecraft_services = (
             "• Приватный вход в МК-кинотеатр — 99 ₽\n"
             "• Показ фильма/сериала/аниме без очереди — 50 ₽\n"
-            "• Права /op — 1 500 ₽"
+            "• Права /op — 2 499 ₽"
         )
 
         add_safe_field(embed, "🎁 Discord-услуги", discord_services, inline=False)
