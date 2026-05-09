@@ -12,7 +12,7 @@ def utcnow_iso() -> str:
 
 
 class SocialGameService:
-    """SQLite-backed storage for opt-in social analytics and game modules."""
+    """SQLite-backed storage for social analytics and game modules."""
 
     async def init_db(self, db: aiosqlite.Connection) -> None:
         await db.executescript(
@@ -20,8 +20,8 @@ class SocialGameService:
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
                 nsfw_rp_enabled INTEGER NOT NULL DEFAULT 0,
-                profile_analytics_enabled INTEGER NOT NULL DEFAULT 0,
-                matchmaking_enabled INTEGER NOT NULL DEFAULT 0,
+                profile_analytics_enabled INTEGER NOT NULL DEFAULT 1,
+                matchmaking_enabled INTEGER NOT NULL DEFAULT 1,
                 story_nsfw_enabled INTEGER NOT NULL DEFAULT 0,
                 log_channel_id INTEGER NOT NULL DEFAULT 0,
                 adult_role_id INTEGER NOT NULL DEFAULT 0,
@@ -40,9 +40,12 @@ class SocialGameService:
             CREATE TABLE IF NOT EXISTS user_privacy_settings (
                 guild_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
-                profile_opt_in INTEGER NOT NULL DEFAULT 0,
-                profile_public INTEGER NOT NULL DEFAULT 0,
-                match_opt_in INTEGER NOT NULL DEFAULT 0,
+                analytics_enabled INTEGER NOT NULL DEFAULT 1,
+                public_profile INTEGER NOT NULL DEFAULT 1,
+                matchmaking_enabled INTEGER NOT NULL DEFAULT 1,
+                profile_opt_in INTEGER NOT NULL DEFAULT 1,
+                profile_public INTEGER NOT NULL DEFAULT 1,
+                match_opt_in INTEGER NOT NULL DEFAULT 1,
                 clone_opt_in INTEGER NOT NULL DEFAULT 0,
                 clone_public INTEGER NOT NULL DEFAULT 0,
                 store_message_samples INTEGER NOT NULL DEFAULT 0,
@@ -167,7 +170,26 @@ class SocialGameService:
             );
             """
         )
+        await self._migrate_privacy_defaults(db)
         await db.commit()
+
+    async def _migrate_privacy_defaults(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(user_privacy_settings)")
+        columns = {str(row["name"] if isinstance(row, aiosqlite.Row) else row[1]) for row in await cursor.fetchall()}
+        migrations = {
+            "analytics_enabled": ("ALTER TABLE user_privacy_settings ADD COLUMN analytics_enabled INTEGER NOT NULL DEFAULT 1", "profile_opt_in"),
+            "public_profile": ("ALTER TABLE user_privacy_settings ADD COLUMN public_profile INTEGER NOT NULL DEFAULT 1", "profile_public"),
+            "matchmaking_enabled": ("ALTER TABLE user_privacy_settings ADD COLUMN matchmaking_enabled INTEGER NOT NULL DEFAULT 1", "match_opt_in"),
+        }
+        for column, (sql, legacy_column) in migrations.items():
+            if column not in columns:
+                await db.execute(sql)
+                if legacy_column in columns:
+                    await db.execute(f"UPDATE user_privacy_settings SET {column} = {legacy_column}")
+        # Keep legacy columns populated for compatibility with older code paths.
+        for column in ("profile_opt_in", "profile_public", "match_opt_in"):
+            if column in columns:
+                await db.execute(f"UPDATE user_privacy_settings SET {column} = 1 WHERE {column} IS NULL")
 
     async def ensure_guild_settings(self, db: aiosqlite.Connection, guild_id: int) -> aiosqlite.Row:
         now = utcnow_iso()
@@ -190,7 +212,11 @@ class SocialGameService:
 
     async def ensure_privacy(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> aiosqlite.Row:
         await db.execute(
-            "INSERT OR IGNORE INTO user_privacy_settings (guild_id, user_id, updated_at) VALUES (?, ?, ?)",
+            """
+            INSERT OR IGNORE INTO user_privacy_settings
+                (guild_id, user_id, analytics_enabled, public_profile, matchmaking_enabled, profile_opt_in, profile_public, match_opt_in, updated_at)
+            VALUES (?, ?, 1, 1, 1, 1, 1, 1, ?)
+            """,
             (guild_id, user_id, utcnow_iso()),
         )
         await db.commit()
@@ -199,12 +225,101 @@ class SocialGameService:
         assert row is not None
         return row
 
+    async def get_privacy_settings(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> dict[str, bool]:
+        cur = await db.execute(
+            "SELECT * FROM user_privacy_settings WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return {
+                "analytics_enabled": True,
+                "public_profile": True,
+                "matchmaking_enabled": True,
+                "store_message_samples": False,
+                "clone_opt_in": False,
+                "clone_public": False,
+            }
+        keys = set(row.keys())
+        analytics = bool(row["analytics_enabled"] if "analytics_enabled" in keys else row["profile_opt_in"])
+        public = bool(row["public_profile"] if "public_profile" in keys else row["profile_public"])
+        matchmaking = bool(row["matchmaking_enabled"] if "matchmaking_enabled" in keys else row["match_opt_in"])
+        return {
+            "analytics_enabled": analytics,
+            "public_profile": public,
+            "matchmaking_enabled": matchmaking,
+            "store_message_samples": bool(row["store_message_samples"]),
+            "clone_opt_in": bool(row["clone_opt_in"]),
+            "clone_public": bool(row["clone_public"]),
+        }
+
     async def set_privacy_flag(self, db: aiosqlite.Connection, guild_id: int, user_id: int, field: str, value: int) -> None:
-        if field not in {"profile_opt_in", "profile_public", "match_opt_in", "clone_opt_in", "clone_public", "store_message_samples"}:
+        aliases = {
+            "profile_opt_in": "analytics_enabled",
+            "profile_public": "public_profile",
+            "match_opt_in": "matchmaking_enabled",
+        }
+        canonical = aliases.get(field, field)
+        if canonical not in {"analytics_enabled", "public_profile", "matchmaking_enabled", "clone_opt_in", "clone_public", "store_message_samples"}:
             raise ValueError("Unsupported privacy setting")
         await self.ensure_privacy(db, guild_id, user_id)
-        await db.execute(f"UPDATE user_privacy_settings SET {field} = ?, updated_at = ? WHERE guild_id = ? AND user_id = ?", (value, utcnow_iso(), guild_id, user_id))
+        updates = [f"{canonical} = ?", "updated_at = ?"]
+        params: list[Any] = [int(value), utcnow_iso()]
+        legacy_by_canonical = {
+            "analytics_enabled": "profile_opt_in",
+            "public_profile": "profile_public",
+            "matchmaking_enabled": "match_opt_in",
+        }
+        legacy = legacy_by_canonical.get(canonical)
+        if legacy:
+            updates.append(f"{legacy} = ?")
+            params.append(int(value))
+        params.extend([guild_id, user_id])
+        await db.execute(f"UPDATE user_privacy_settings SET {', '.join(updates)} WHERE guild_id = ? AND user_id = ?", tuple(params))
         await db.commit()
+
+    async def set_profile_privacy(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+        user_id: int,
+        *,
+        analytics_enabled: bool,
+        public_profile: bool,
+        matchmaking_enabled: bool,
+    ) -> None:
+        await self.ensure_privacy(db, guild_id, user_id)
+        await db.execute(
+            """
+            UPDATE user_privacy_settings
+            SET analytics_enabled = ?, public_profile = ?, matchmaking_enabled = ?,
+                profile_opt_in = ?, profile_public = ?, match_opt_in = ?, updated_at = ?
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (
+                int(analytics_enabled), int(public_profile), int(matchmaking_enabled),
+                int(analytics_enabled), int(public_profile), int(matchmaking_enabled),
+                utcnow_iso(), guild_id, user_id,
+            ),
+        )
+        await db.commit()
+
+    async def forget_profile_data(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> None:
+        for table, column in (
+            ("user_activity_aggregates", "user_id"),
+            ("user_weekly_style_stats", "user_id"),
+            ("user_social_edges", "user_id"),
+        ):
+            await db.execute(f"DELETE FROM {table} WHERE guild_id = ? AND {column} = ?", (guild_id, user_id))
+        await db.execute("DELETE FROM user_social_edges WHERE guild_id = ? AND other_user_id = ?", (guild_id, user_id))
+        await self.set_profile_privacy(
+            db,
+            guild_id,
+            user_id,
+            analytics_enabled=False,
+            public_profile=False,
+            matchmaking_enabled=False,
+        )
 
     async def forget_user(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> None:
         for table, column in (

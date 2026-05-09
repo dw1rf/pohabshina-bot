@@ -13,38 +13,6 @@ from cogs.social_game_content import RP_ACTIONS
 logger = logging.getLogger(__name__)
 
 
-class RPConfirmView(discord.ui.View):
-    def __init__(self, author: discord.Member, target: discord.Member, action_label: str, final_text: str, comment: str | None) -> None:
-        super().__init__(timeout=120)
-        self.author = author
-        self.target = target
-        self.action_label = action_label
-        self.final_text = final_text
-        self.comment = comment
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.target.id:
-            await interaction.response.send_message("Ответить может только участник, которому предложили RP-действие.", ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label="Принять", style=discord.ButtonStyle.success)
-    async def accept(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        desc = f"{self.author.mention} и {self.target.mention}: {self.final_text}"
-        if self.comment:
-            desc += f"\n\nКомментарий: {discord.utils.escape_markdown(self.comment)[:300]}"
-        embed = discord.Embed(title="RP-действие принято", description=desc, color=discord.Color.green(), timestamp=datetime.now(UTC))
-        embed.set_footer(text="Взаимное согласие подтверждено кнопкой. Можно остановить сцену в любой момент.")
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
-
-    @discord.ui.button(label="Отклонить", style=discord.ButtonStyle.secondary)
-    async def decline(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        embed = discord.Embed(title="RP-действие отклонено", description="Предложение спокойно отклонено. Уважайте границы друг друга.", color=discord.Color.light_grey())
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
-
-
 class RoleplayCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
@@ -71,7 +39,7 @@ class RoleplayCog(commands.Cog):
 
     async def _handle_action(self, interaction: discord.Interaction, action_key: str, target: discord.Member, comment: str | None) -> None:
         try:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member) or self.bot.db is None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
                 await interaction.response.send_message("RP-команды доступны только на сервере.", ephemeral=True)
                 return
             author = interaction.user
@@ -84,23 +52,8 @@ class RoleplayCog(commands.Cog):
 
             payload = RP_ACTIONS[action_key]
             nsfw = bool(payload["nsfw"])
-            settings = await self.bot.social_games.ensure_guild_settings(self.bot.db, interaction.guild.id)
-            if nsfw:
-                if not bool(settings["nsfw_rp_enabled"]):
-                    await interaction.response.send_message("NSFW RP выключено на этом сервере.", ephemeral=True)
-                    return
-                if not getattr(interaction.channel, "is_nsfw", lambda: False)():
-                    await interaction.response.send_message("NSFW RP доступно только в каналах с флагом NSFW.", ephemeral=True)
-                    return
-                adult_role_id = int(settings["adult_role_id"] or 0)
-                if adult_role_id and (adult_role_id not in {role.id for role in author.roles} or adult_role_id not in {role.id for role in target.roles}):
-                    await interaction.response.send_message("Для NSFW RP у обоих участников должна быть роль 18+.", ephemeral=True)
-                    return
-
-            author_ok = await self.bot.social_games.has_rp_consent(self.bot.db, interaction.guild.id, author.id, nsfw=nsfw)
-            target_ok = await self.bot.social_games.has_rp_consent(self.bot.db, interaction.guild.id, target.id, nsfw=nsfw)
-            if not author_ok or not target_ok:
-                await interaction.response.send_message("Оба участника должны заранее включить RP-согласие командой /rp_consent.", ephemeral=True)
+            if nsfw and not getattr(interaction.channel, "is_nsfw", lambda: False)():
+                await interaction.response.send_message("Эта команда доступна только в NSFW-канале.", ephemeral=True)
                 return
 
             cd_key = (interaction.guild.id, target.id, action_key)
@@ -111,14 +64,17 @@ class RoleplayCog(commands.Cog):
                 return
             self._target_cooldowns[cd_key] = now + timedelta(seconds=60)
 
+            description = f"{author.mention} выполняет RP-действие **{payload['label']}** для {target.mention}."
+            if comment:
+                description += f"\n\nКомментарий: {discord.utils.escape_markdown(comment)[:300]}"
             embed = discord.Embed(
                 title="RP-действие",
-                description=f"{author.mention} предлагает действие: **{payload['label']}** для {target.mention}",
+                description=description,
                 color=discord.Color.purple() if nsfw else discord.Color.blurple(),
                 timestamp=now,
             )
-            embed.set_footer(text="Нужно согласие второго участника. Развлекательная RP-сцена, не факт и не принуждение.")
-            await interaction.response.send_message(embed=embed, view=RPConfirmView(author, target, str(payload["label"]), str(payload["text"]), comment))
+            embed.set_footer(text="Игровое RP-действие. Используйте команды ответственно.")
+            await interaction.response.send_message(embed=embed)
         except Exception:
             logger.exception("RP action failed: guild=%s action=%s", getattr(interaction.guild, "id", None), action_key)
             if interaction.response.is_done():
@@ -126,13 +82,13 @@ class RoleplayCog(commands.Cog):
             else:
                 await interaction.response.send_message("Ошибка RP-команды. Попробуйте позже.", ephemeral=True)
 
-    @app_commands.command(name="rp_consent", description="Настроить согласие на RP-взаимодействия")
+    @app_commands.command(name="rp_consent", description="Устаревшая настройка RP-согласия")
     async def rp_consent(self, interaction: discord.Interaction, sfw: bool, nsfw: bool = False) -> None:
         if interaction.guild is None or self.bot.db is None:
             await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
             return
         await self.bot.social_games.set_rp_consent(self.bot.db, interaction.guild.id, interaction.user.id, sfw=sfw, nsfw=nsfw)
-        await interaction.response.send_message(f"RP-согласие обновлено: SFW={sfw}, NSFW={nsfw}.", ephemeral=True)
+        await interaction.response.send_message("Настройка сохранена, но RP-действия теперь публикуются сразу без кнопок подтверждения.", ephemeral=True)
 
 
 async def setup(bot: MovieBot) -> None:
