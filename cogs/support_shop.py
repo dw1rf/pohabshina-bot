@@ -10,10 +10,31 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from services.support_ticket_service import SupportTicket
-from utils.embed_format import indent_lines
 from cogs.social_game_content import SERVICE_INSTRUCTIONS, SHOP_DEFAULT_INSTRUCTION, SHOP_URL
 
 logger = logging.getLogger(__name__)
+
+
+def add_safe_field(embed: discord.Embed, name: str, value: str, inline: bool = False) -> None:
+    if len(value) <= 1024:
+        embed.add_field(name=name, value=value, inline=inline)
+        return
+
+    chunks: list[str] = []
+    current = ""
+    for line in value.splitlines():
+        if len(current) + len(line) + 1 > 1000:
+            if current:
+                chunks.append(current)
+            current = line
+        else:
+            current += ("\n" if current else "") + line
+    if current:
+        chunks.append(current)
+
+    for index, chunk in enumerate(chunks, start=1):
+        field_name = name if index == 1 else f"{name} #{index}"
+        embed.add_field(name=field_name[:256], value=chunk[:1024], inline=inline)
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,41 +278,48 @@ class SupportShopCog(commands.Cog):
         )
 
     def _build_shop_embed(self) -> discord.Embed:
-        available_lines: list[str] = []
-        for service in SHOP_SERVICES:
-            available_lines.append(f"• {service.title} — {service.price} • Доступно")
-            if service.description:
-                available_lines.append(indent_lines(service.description, 2))
-
-        how_to_order = "\n".join(
-            [
-                "1. Выберите услугу через меню ниже.",
-                "2. Бот создаст приватное обращение.",
-                "3. Администратор выдаст реквизиты.",
-                "4. После оплаты отправьте чек в тикет.",
-                "5. Срок выполнения: обычно от 5 минут до 24 часов.",
-            ]
-        )
-        important = "\n".join(
-            [
-                "• Оплата только на карту администраторам, без посредников.",
-                "• Суббота и воскресенье — выходные дни.",
-                "• Возврат невозможен после оказания услуги, кроме случая, если услуга не была выдана.",
-                "• Администрация может отказать в услуге без объяснения причин.",
-                "• Цены могут меняться.",
-                "• /op выдаётся только после личной проверки и согласования.",
-            ]
-        )
-
         embed = discord.Embed(
-            title="Услуги Discord",
-            description=f"Выберите услугу ниже или откройте сайт магазина: {SHOP_URL}",
-            color=discord.Color.gold(),
+            title="🛒 Магазин сервера",
+            description=(
+                "Выберите услугу ниже. После выбора бот сразу отправит инструкцию по покупке.\n\n"
+                f"🌐 Магазин: {SHOP_URL}"
+            ),
+            color=discord.Color.purple(),
         )
-        embed.add_field(name="Доступно", value=indent_lines("\n".join(available_lines), 2), inline=False)
-        embed.add_field(name="Как оплатить и заказать", value=indent_lines(how_to_order, 2), inline=False)
-        embed.add_field(name="Важно", value=indent_lines(important, 2), inline=False)
+
+        discord_services = (
+            "• Разбан в Discord — 100 ₽\n"
+            "• Размут в Discord — 50 ₽\n"
+            "• Снятие 1 предупреждения — 20 ₽\n"
+            "• Уникальная роль — 100 ₽\n"
+            "• Персональный значок — 50 ₽"
+        )
+        role_services = (
+            "• Пак индивидуальных — 49 ₽\n"
+            "• Повышение существующей роли на 1 ступень — 49 ₽"
+        )
+        minecraft_services = (
+            "• Приватный вход в МК-кинотеатр — 99 ₽\n"
+            "• Показ фильма/сериала/аниме без очереди — 50 ₽\n"
+            "• Права /op — 1 500 ₽"
+        )
+
+        add_safe_field(embed, "🎁 Discord-услуги", discord_services, inline=False)
+        add_safe_field(embed, "⭐ Роли и индивидуальные услуги", role_services, inline=False)
+        add_safe_field(embed, "🎬 Minecraft и показы", minecraft_services, inline=False)
+        add_safe_field(embed, "🌐 Сайт магазина", SHOP_URL, inline=False)
+        embed.set_footer(text="Нажмите на услугу ниже, чтобы получить инструкцию.")
         return embed
+
+    @staticmethod
+    def _validate_embed_limits(embed: discord.Embed) -> None:
+        if embed.description and len(embed.description) > 4096:
+            raise ValueError(f"Embed description too long: {len(embed.description)} chars")
+        for index, field in enumerate(embed.fields):
+            if len(field.value) > 1024:
+                raise ValueError(f"Embed field {index} too long: {len(field.value)} chars")
+            if len(field.name) > 256:
+                raise ValueError(f"Embed field {index} name too long: {len(field.name)} chars")
 
     def _build_minecraft_rules_embeds(self) -> list[discord.Embed]:
         max_description_length = 3900
@@ -574,7 +602,19 @@ class SupportShopCog(commands.Cog):
             await interaction.response.send_message("У вас нет прав для этой команды.", ephemeral=True)
             return
 
-        await interaction.response.send_message(embed=self._build_shop_embed(), view=ShopPanelView(self))
+        try:
+            embed = self._build_shop_embed()
+            self._validate_embed_limits(embed)
+            await interaction.response.send_message(embed=embed, view=ShopPanelView(self))
+        except ValueError:
+            logger.exception("Shop panel embed failed validation")
+            await interaction.response.send_message("Ошибка магазина: embed слишком длинный. Сообщите администрации.", ephemeral=True)
+        except discord.HTTPException:
+            logger.exception("Failed to send shop panel")
+            if interaction.response.is_done():
+                await interaction.followup.send("Ошибка магазина: embed слишком длинный. Сообщите администрации.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Ошибка магазина: embed слишком длинный. Сообщите администрации.", ephemeral=True)
 
     @app_commands.command(name="rules_minecraft", description="Показать правила Minecraft-сервера")
     async def rules_minecraft(self, interaction: discord.Interaction) -> None:
