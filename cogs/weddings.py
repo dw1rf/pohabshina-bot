@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
+from PIL import Image, ImageDraw, ImageFont
 
 from bot_client import MovieBot
 
@@ -20,6 +22,141 @@ PROPOSAL_TTL = timedelta(minutes=5)
 WEDDING_COLOR = discord.Color.from_rgb(255, 105, 180)
 GOLD_COLOR = discord.Color.gold()
 DIVORCE_COLOR = discord.Color.red()
+RELATIONSHIP_COLOR = discord.Color.from_rgb(255, 105, 180)
+
+RELATIONSHIP_LEVELS: tuple[tuple[int, str], ...] = (
+    (0, "Знакомые"),
+    (100, "Симпатия"),
+    (300, "Влюблённые"),
+    (700, "Крепкий союз"),
+    (1200, "Родственные души"),
+    (2000, "Легендарная пара"),
+    (3500, "Вечный союз"),
+    (6000, "Любовь вне времени"),
+)
+RELATIONSHIP_ACTIONS: dict[str, dict[str, Any]] = {
+    "gift": {"title": "🎁 Подарок для партнёра", "xp": 25, "cooldown": timedelta(days=1)},
+    "date": {"title": "🌙 Свидание пары", "xp": 35, "cooldown": timedelta(hours=6)},
+    "hug": {"title": "🤗 Объятия", "xp": 5, "cooldown": timedelta(minutes=30)},
+    "kiss": {"title": "💋 Поцелуй", "xp": 5, "cooldown": timedelta(minutes=30)},
+}
+
+
+def calculate_relationship_level(xp: int) -> int:
+    level = 1
+    for index, (required_xp, _) in enumerate(RELATIONSHIP_LEVELS, start=1):
+        if xp >= required_xp:
+            level = index
+        else:
+            break
+    return level
+
+
+def get_relationship_level_title(level: int) -> str:
+    if 1 <= level <= len(RELATIONSHIP_LEVELS):
+        return RELATIONSHIP_LEVELS[level - 1][1]
+    return RELATIONSHIP_LEVELS[0][1]
+
+
+def get_next_level_xp(level: int) -> int | None:
+    if level >= len(RELATIONSHIP_LEVELS):
+        return None
+    return RELATIONSHIP_LEVELS[level][0]
+
+
+def build_progress_bar(current_xp: int, level: int) -> str:
+    next_xp = get_next_level_xp(level)
+    current_level_xp = RELATIONSHIP_LEVELS[max(level - 1, 0)][0]
+    if next_xp is None:
+        return "██████████ 100%"
+    required = max(next_xp - current_level_xp, 1)
+    gained = max(current_xp - current_level_xp, 0)
+    percent = min(max(gained / required, 0), 1)
+    filled = int(percent * 10)
+    return f"{'█' * filled}{'░' * (10 - filled)} {percent:.0%}"
+
+
+def _format_timedelta_ru(delta: timedelta) -> str:
+    total_minutes = max(int(delta.total_seconds() // 60), 1)
+    if total_minutes >= 60:
+        hours, minutes = divmod(total_minutes, 60)
+        if minutes:
+            return f"{hours} ч. {minutes} мин."
+        return f"{hours} ч."
+    return f"{total_minutes} мин."
+
+
+def _load_relationship_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _truncate_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    suffix = "…"
+    while text and draw.textlength(text + suffix, font=font) > max_width:
+        text = text[:-1]
+    return text + suffix if text else suffix
+
+
+def generate_relationship_top_image(rows: list[aiosqlite.Row], users_cache: dict[int, str]) -> io.BytesIO:
+    width = 900
+    row_height = 112
+    height = 125 + max(len(rows), 1) * row_height
+    image = Image.new("RGB", (width, height), (27, 29, 40))
+    draw = ImageDraw.Draw(image)
+
+    title_font = _load_relationship_font(36, bold=True)
+    name_font = _load_relationship_font(24, bold=True)
+    meta_font = _load_relationship_font(20)
+    small_font = _load_relationship_font(16)
+
+    draw.rounded_rectangle((20, 20, width - 20, height - 20), radius=28, fill=(35, 38, 52), outline=(255, 105, 180), width=2)
+    draw.text((48, 42), "🏆 Топ отношений сервера", fill=(255, 226, 128), font=title_font)
+
+    max_xp = max((int(row["relationship_xp"]) for row in rows), default=1)
+    max_xp = max(max_xp, 1)
+    y = 105
+    for index, row in enumerate(rows, start=1):
+        card_color = (44, 48, 65) if index % 2 else (39, 43, 59)
+        draw.rounded_rectangle((48, y, width - 48, y + 92), radius=18, fill=card_color)
+        place_color = (255, 215, 0) if index == 1 else (210, 210, 220)
+        draw.text((72, y + 18), f"#{index}", fill=place_color, font=name_font)
+
+        proposer_id = int(row["proposer_id"])
+        partner_id = int(row["partner_id"])
+        names = f"{users_cache.get(proposer_id, str(proposer_id))} + {users_cache.get(partner_id, str(partner_id))}"
+        names = _truncate_text(draw, names, name_font, 540)
+        level = int(row["relationship_level"])
+        xp = int(row["relationship_xp"])
+        streak = int(row["relationship_streak_days"])
+        draw.text((145, y + 13), names, fill=(245, 246, 255), font=name_font)
+        meta = f"Уровень {level} — {get_relationship_level_title(level)} · {xp} XP · 🔥 {streak} дн."
+        draw.text((145, y + 48), meta, fill=(196, 202, 220), font=meta_font)
+
+        bar_x, bar_y, bar_w, bar_h = 145, y + 76, 660, 10
+        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=5, fill=(71, 76, 96))
+        filled = int(bar_w * (xp / max_xp))
+        if filled > 0:
+            draw.rounded_rectangle((bar_x, bar_y, bar_x + filled, bar_y + bar_h), radius=5, fill=(255, 105, 180))
+        draw.text((815, y + 68), f"{int(xp / max_xp * 100)}%", fill=(180, 185, 205), font=small_font)
+        y += row_height
+
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    output.seek(0)
+    return output
 
 
 def utcnow() -> datetime:
@@ -92,10 +229,48 @@ async def init_weddings_db(db_path: Path = WEDDINGS_DB_PATH) -> aiosqlite.Connec
         ON wedding_marriages (guild_id, divorced_at, married_at)
         """
     )
+    cursor = await db.execute("PRAGMA table_info(wedding_marriages)")
+    existing_columns = {str(row["name"]) for row in await cursor.fetchall()}
+    relationship_columns = {
+        "relationship_xp": "INTEGER DEFAULT 0",
+        "relationship_level": "INTEGER DEFAULT 1",
+        "relationship_streak_days": "INTEGER DEFAULT 0",
+        "relationship_last_daily": "TEXT DEFAULT NULL",
+        "relationship_last_interaction_at": "TEXT DEFAULT NULL",
+    }
+    for column_name, column_definition in relationship_columns.items():
+        if column_name not in existing_columns:
+            await db.execute(f"ALTER TABLE wedding_marriages ADD COLUMN {column_name} {column_definition}")
+
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS relationship_xp_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            marriage_id INTEGER NOT NULL,
+            actor_id INTEGER DEFAULT NULL,
+            action TEXT NOT NULL,
+            xp_amount INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     await db.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_wedding_active_members_marriage
         ON wedding_active_members (guild_id, marriage_id)
+        """
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_wedding_marriages_relationship_top
+        ON wedding_marriages (guild_id, relationship_level, relationship_xp, relationship_streak_days)
+        """
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_relationship_xp_logs_marriage_action
+        ON relationship_xp_logs (guild_id, marriage_id, action, created_at)
         """
     )
     await db.commit()
@@ -182,6 +357,67 @@ class ProposalView(discord.ui.View):
         )
         await self._disable_buttons()
         await interaction.response.edit_message(content=None, embed=embed, view=self)
+
+
+class RelationshipMenuView(discord.ui.View):
+    def __init__(self, cog: WeddingsCog, owner_id: int, guild_id: int, marriage_id: int) -> None:
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.marriage_id = marriage_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Это меню отношений открыто не для вас.", ephemeral=True)
+            return False
+        return True
+
+    async def _run_action(self, interaction: discord.Interaction, action: str) -> None:
+        await self.cog.handle_relationship_action(interaction, self, action)
+
+    @discord.ui.button(label="🎁 Подарок", style=discord.ButtonStyle.primary, row=0)
+    async def gift(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "gift")
+
+    @discord.ui.button(label="🌙 Свидание", style=discord.ButtonStyle.primary, row=0)
+    async def date(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "date")
+
+    @discord.ui.button(label="🤗 Обнять", style=discord.ButtonStyle.secondary, row=1)
+    async def hug(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "hug")
+
+    @discord.ui.button(label="💋 Поцеловать", style=discord.ButtonStyle.secondary, row=1)
+    async def kiss(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "kiss")
+
+    @discord.ui.button(label="🎁 Ежедневный бонус", style=discord.ButtonStyle.success, row=2)
+    async def daily(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await self._run_action(interaction, "daily")
+
+    @discord.ui.button(label="💑 Профиль пары", style=discord.ButtonStyle.secondary, row=3)
+    async def profile(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        marriage = await self.cog.get_active_marriage(self.guild_id, self.owner_id)
+        if marriage is None:
+            await interaction.response.send_message("Вы не состоите в браке.", ephemeral=True)
+            return
+        embed = await self.cog.build_couple_embed(marriage)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="🏆 Топ отношений", style=discord.ButtonStyle.primary, row=3)
+    async def top(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self.cog.send_relationship_top(interaction, public=True)
+
+    @discord.ui.button(label="🔄 Обновить", style=discord.ButtonStyle.secondary, row=4)
+    async def refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        marriage = await self.cog.get_active_marriage(self.guild_id, self.owner_id)
+        if marriage is None:
+            await interaction.response.send_message("Вы не состоите в браке.", ephemeral=True)
+            return
+        embed = await self.cog.build_relationship_menu_embed(marriage)
+        await interaction.response.edit_message(embed=embed, view=self)
 
 
 class WeddingsCog(commands.Cog):
@@ -286,6 +522,356 @@ class WeddingsCog(commands.Cog):
         proposer_id = int(row["proposer_id"])
         partner_id = int(row["partner_id"])
         return partner_id if proposer_id == user_id else proposer_id
+
+    async def log_relationship_action(
+        self,
+        guild_id: int,
+        marriage_id: int,
+        actor_id: int | None,
+        action: str,
+        xp_amount: int,
+        created_at: str,
+    ) -> None:
+        db = self._connection()
+        await db.execute(
+            """
+            INSERT INTO relationship_xp_logs (guild_id, marriage_id, actor_id, action, xp_amount, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, marriage_id, actor_id, action, xp_amount, created_at),
+        )
+
+    async def check_relationship_action_cooldown(
+        self,
+        guild_id: int,
+        marriage_id: int,
+        action: str,
+        cooldown: timedelta,
+        now: datetime | None = None,
+    ) -> timedelta | None:
+        db = self._connection()
+        current_time = now or utcnow()
+        cursor = await db.execute(
+            """
+            SELECT created_at FROM relationship_xp_logs
+            WHERE guild_id = ? AND marriage_id = ? AND action = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (guild_id, marriage_id, action),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        available_at = parse_iso(row["created_at"]) + cooldown
+        if available_at > current_time:
+            return available_at - current_time
+        return None
+
+    def update_daily_relationship_streak(self, marriage: aiosqlite.Row, today: datetime) -> tuple[int, int]:
+        today_date = today.date()
+        last_daily = marriage["relationship_last_daily"]
+        current_streak = int(marriage["relationship_streak_days"] or 0)
+        if last_daily:
+            last_date = parse_iso(last_daily).date()
+            if last_date == today_date:
+                return current_streak, 0
+            if last_date == today_date - timedelta(days=1):
+                new_streak = current_streak + 1
+            else:
+                new_streak = 1
+        else:
+            new_streak = 1
+        xp_amount = 20 + min(new_streak * 2, 30)
+        return new_streak, xp_amount
+
+    async def add_relationship_xp(
+        self,
+        guild_id: int,
+        marriage_id: int,
+        actor_id: int,
+        action: str,
+        xp_amount: int,
+        *,
+        streak_days: int | None = None,
+    ) -> tuple[aiosqlite.Row | None, int, int, int]:
+        db = self._connection()
+        now = to_iso()
+        cursor = await db.execute(
+            """
+            SELECT * FROM wedding_marriages
+            WHERE guild_id = ? AND id = ? AND divorced_at IS NULL
+            LIMIT 1
+            """,
+            (guild_id, marriage_id),
+        )
+        marriage = await cursor.fetchone()
+        if marriage is None:
+            return None, 0, 0, 0
+
+        old_level = int(marriage["relationship_level"] or 1)
+        new_xp = int(marriage["relationship_xp"] or 0) + xp_amount
+        new_level = calculate_relationship_level(new_xp)
+        if streak_days is None:
+            await db.execute(
+                """
+                UPDATE wedding_marriages
+                SET relationship_xp = ?, relationship_level = ?, relationship_last_interaction_at = ?
+                WHERE guild_id = ? AND id = ? AND divorced_at IS NULL
+                """,
+                (new_xp, new_level, now, guild_id, marriage_id),
+            )
+        else:
+            await db.execute(
+                """
+                UPDATE wedding_marriages
+                SET relationship_xp = ?, relationship_level = ?, relationship_streak_days = ?,
+                    relationship_last_daily = ?, relationship_last_interaction_at = ?
+                WHERE guild_id = ? AND id = ? AND divorced_at IS NULL
+                """,
+                (new_xp, new_level, streak_days, now, now, guild_id, marriage_id),
+            )
+        await self.log_relationship_action(guild_id, marriage_id, actor_id, action, xp_amount, now)
+        cursor = await db.execute("SELECT * FROM wedding_marriages WHERE guild_id = ? AND id = ?", (guild_id, marriage_id))
+        updated = await cursor.fetchone()
+        return updated, old_level, new_level, xp_amount
+
+    async def perform_relationship_action(
+        self, guild_id: int, actor: discord.abc.User, action: str
+    ) -> tuple[aiosqlite.Row | None, str | None, int, int, int]:
+        if actor.bot:
+            return None, "XP отношений не начисляется ботам.", 0, 0, 0
+        db = self._connection()
+        async with self._db_lock:
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                cursor = await db.execute(
+                    """
+                    SELECT m.*
+                    FROM wedding_active_members AS a
+                    JOIN wedding_marriages AS m ON m.id = a.marriage_id
+                    WHERE a.guild_id = ? AND a.user_id = ? AND m.divorced_at IS NULL
+                    LIMIT 1
+                    """,
+                    (guild_id, actor.id),
+                )
+                marriage = await cursor.fetchone()
+                if marriage is None:
+                    await db.commit()
+                    return None, "Вы не состоите в браке.", 0, 0, 0
+
+                marriage_id = int(marriage["id"])
+                now = utcnow()
+                if action == "daily":
+                    last_daily = marriage["relationship_last_daily"]
+                    if last_daily and parse_iso(last_daily).date() == now.date():
+                        next_day = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
+                        await db.commit()
+                        return marriage, f"Это действие пока недоступно. Попробуйте через {_format_timedelta_ru(next_day - now)}", 0, 0, 0
+                    streak_days, xp_amount = self.update_daily_relationship_streak(marriage, now)
+                    updated, old_level, new_level, actual_xp = await self.add_relationship_xp(
+                        guild_id, marriage_id, actor.id, action, xp_amount, streak_days=streak_days
+                    )
+                else:
+                    config = RELATIONSHIP_ACTIONS[action]
+                    remaining = await self.check_relationship_action_cooldown(
+                        guild_id, marriage_id, action, config["cooldown"], now
+                    )
+                    if remaining is not None:
+                        await db.commit()
+                        return marriage, f"Это действие пока недоступно. Попробуйте через {_format_timedelta_ru(remaining)}", 0, 0, 0
+                    updated, old_level, new_level, actual_xp = await self.add_relationship_xp(
+                        guild_id, marriage_id, actor.id, action, int(config["xp"])
+                    )
+
+                await db.commit()
+                return updated, None, old_level, new_level, actual_xp
+            except Exception:
+                await db.rollback()
+                logger.exception("Failed to perform relationship action %s", action)
+                return None, "Не удалось начислить XP отношений.", 0, 0, 0
+
+    async def build_couple_embed(self, marriage: aiosqlite.Row) -> discord.Embed:
+        proposer = await self._safe_fetch_user(int(marriage["proposer_id"]))
+        partner = await self._safe_fetch_user(int(marriage["partner_id"]))
+        proposer_mention = self._mention(int(marriage["proposer_id"]), proposer)
+        partner_mention = self._mention(int(marriage["partner_id"]), partner)
+        level = int(marriage["relationship_level"] or 1)
+        xp = int(marriage["relationship_xp"] or 0)
+        next_xp = get_next_level_xp(level)
+        xp_text = f"{xp} XP" if next_xp is None else f"{xp} / {next_xp} XP"
+        embed = discord.Embed(title="💑 Информация о паре", color=WEDDING_COLOR, timestamp=utcnow())
+        embed.add_field(name="Участники пары", value=f"{proposer_mention} + {partner_mention}", inline=False)
+        embed.add_field(name="Дата свадьбы", value=format_dt(marriage["married_at"]), inline=True)
+        embed.add_field(name="Сколько дней вместе", value=f"{days_together(marriage['married_at'])} дн.", inline=True)
+        embed.add_field(name="Статус", value="В браке", inline=True)
+        embed.add_field(name="Уровень отношений", value=f"{level} — {get_relationship_level_title(level)}", inline=True)
+        embed.add_field(name="XP", value=xp_text, inline=True)
+        embed.add_field(name="Серия", value=f"{int(marriage['relationship_streak_days'] or 0)} дн.", inline=True)
+        embed.add_field(name="Прогресс", value=build_progress_bar(xp, level), inline=False)
+        thumb_user = partner or proposer
+        if thumb_user is not None:
+            embed.set_thumbnail(url=thumb_user.display_avatar.url)
+        return embed
+
+    async def build_relationship_menu_embed(self, marriage: aiosqlite.Row) -> discord.Embed:
+        proposer = await self._safe_fetch_user(int(marriage["proposer_id"]))
+        partner = await self._safe_fetch_user(int(marriage["partner_id"]))
+        proposer_mention = self._mention(int(marriage["proposer_id"]), proposer)
+        partner_mention = self._mention(int(marriage["partner_id"]), partner)
+        level = int(marriage["relationship_level"] or 1)
+        xp = int(marriage["relationship_xp"] or 0)
+        next_xp = get_next_level_xp(level)
+        xp_text = f"{xp} / максимум" if next_xp is None else f"{xp} / {next_xp}"
+        embed = discord.Embed(title="💞 Отношения пары", color=RELATIONSHIP_COLOR, timestamp=utcnow())
+        embed.description = (
+            f"**Пара:** {proposer_mention} + {partner_mention}\n"
+            f"**Уровень:** {level} — {get_relationship_level_title(level)}\n"
+            f"**XP:** {xp_text}\n"
+            f"**Прогресс:** {build_progress_bar(xp, level)}\n"
+            f"**Серия:** {int(marriage['relationship_streak_days'] or 0)} дн.\n"
+            f"**В браке:** {days_together(marriage['married_at'])} дн."
+        )
+        embed.set_footer(text="Нажмите кнопку, чтобы развивать отношения пары.")
+        return embed
+
+    async def build_relationship_action_embed(
+        self,
+        actor: discord.abc.User,
+        marriage: aiosqlite.Row,
+        action: str,
+        xp_amount: int,
+        old_level: int,
+        new_level: int,
+    ) -> discord.Embed:
+        partner_id = self._partner_id(marriage, actor.id)
+        partner = await self._safe_fetch_user(partner_id)
+        partner_mention = self._mention(partner_id, partner)
+        if action == "gift":
+            title = "🎁 Подарок для партнёра"
+            description = f"{actor.mention} сделал(а) подарок {partner_mention}\n+{xp_amount} XP к отношениям пары"
+        elif action == "date":
+            title = "🌙 Свидание пары"
+            description = f"{actor.mention} и {partner_mention} провели время вместе\n+{xp_amount} XP к отношениям пары"
+        elif action == "hug":
+            title = "🤗 Объятия"
+            description = f"{actor.mention} обнял(а) {partner_mention}\n+{xp_amount} XP к отношениям пары"
+        elif action == "kiss":
+            title = "💋 Поцелуй"
+            description = f"{actor.mention} поцеловал(а) {partner_mention}\n+{xp_amount} XP к отношениям пары"
+        else:
+            title = "🎁 Ежедневный бонус пары"
+            description = (
+                f"Пара {actor.mention} и {partner_mention} получила +{xp_amount} XP\n"
+                f"Серия: {int(marriage['relationship_streak_days'] or 0)} дн."
+            )
+        embed = discord.Embed(title=title, description=description, color=RELATIONSHIP_COLOR, timestamp=utcnow())
+        if new_level > old_level:
+            embed.add_field(
+                name="💞 Новый уровень",
+                value=f"Теперь пара: {new_level} — {get_relationship_level_title(new_level)}",
+                inline=False,
+            )
+        return embed
+
+    async def handle_relationship_action(
+        self, interaction: discord.Interaction, view: RelationshipMenuView, action: str
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        marriage, error_text, old_level, new_level, xp_amount = await self.perform_relationship_action(
+            interaction.guild.id, interaction.user, action
+        )
+        if error_text is not None:
+            await interaction.followup.send(error_text, ephemeral=True)
+            return
+        if marriage is None:
+            await interaction.followup.send("Вы не состоите в браке.", ephemeral=True)
+            return
+        public_embed = await self.build_relationship_action_embed(interaction.user, marriage, action, xp_amount, old_level, new_level)
+        if interaction.channel is not None:
+            await interaction.channel.send(embed=public_embed)
+        menu_embed = await self.build_relationship_menu_embed(marriage)
+        view.marriage_id = int(marriage["id"])
+        await interaction.edit_original_response(embed=menu_embed, view=view)
+
+    async def get_relationship_top_rows(self, guild_id: int) -> list[aiosqlite.Row]:
+        db = self._connection()
+        cursor = await db.execute(
+            """
+            SELECT * FROM wedding_marriages
+            WHERE guild_id = ? AND divorced_at IS NULL
+            ORDER BY relationship_level DESC, relationship_xp DESC, relationship_streak_days DESC, married_at ASC
+            LIMIT 10
+            """,
+            (guild_id,),
+        )
+        return list(await cursor.fetchall())
+
+    async def build_relationship_top_payload(
+        self, guild_id: int
+    ) -> tuple[discord.Embed, discord.File | None]:
+        rows = await self.get_relationship_top_rows(guild_id)
+        if not rows:
+            return discord.Embed(
+                title="🏆 Топ отношений",
+                description="Пока нет активных пар.",
+                color=GOLD_COLOR,
+                timestamp=utcnow(),
+            ), None
+
+        users_cache: dict[int, str] = {}
+        lines: list[str] = []
+        for index, row in enumerate(rows, start=1):
+            proposer = await self._safe_fetch_user(int(row["proposer_id"]))
+            partner = await self._safe_fetch_user(int(row["partner_id"]))
+            proposer_name = proposer.display_name if proposer is not None else str(row["proposer_id"])
+            partner_name = partner.display_name if partner is not None else str(row["partner_id"])
+            users_cache[int(row["proposer_id"])] = proposer_name
+            users_cache[int(row["partner_id"])] = partner_name
+            level = int(row["relationship_level"] or 1)
+            lines.append(
+                f"#{index} — {self._mention(int(row['proposer_id']), proposer)} + "
+                f"{self._mention(int(row['partner_id']), partner)}\n"
+                f"Уровень {level} · {int(row['relationship_xp'] or 0)} XP · "
+                f"серия {int(row['relationship_streak_days'] or 0)} дн."
+            )
+
+        embed = discord.Embed(
+            title="🏆 Топ отношений",
+            description="\n\n".join(lines),
+            color=GOLD_COLOR,
+            timestamp=utcnow(),
+        )
+        try:
+            image = generate_relationship_top_image(rows, users_cache)
+            file = discord.File(image, filename="relationship_top.png")
+            embed.set_image(url="attachment://relationship_top.png")
+            return embed, file
+        except Exception:
+            logger.exception("Failed to generate relationship top image")
+            return embed, None
+
+    async def send_relationship_top(self, interaction: discord.Interaction, *, public: bool = False) -> None:
+        if interaction.guild is None:
+            if interaction.response.is_done():
+                await interaction.followup.send("Эта команда доступна только на сервере.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
+            return
+        embed, file = await self.build_relationship_top_payload(interaction.guild.id)
+        kwargs: dict[str, Any] = {"embed": embed}
+        if file is not None:
+            kwargs["file"] = file
+        if public and interaction.channel is not None:
+            await interaction.channel.send(**kwargs)
+            await interaction.followup.send("Топ отношений отправлен в канал.", ephemeral=True)
+        elif interaction.response.is_done():
+            await interaction.followup.send(**kwargs)
+        else:
+            await interaction.response.send_message(**kwargs)
 
     async def create_proposal(self, guild_id: int, proposer_id: int, receiver_id: int) -> tuple[bool, str, str | None]:
         db = self._connection()
@@ -536,19 +1122,29 @@ class WeddingsCog(commands.Cog):
             await interaction.response.send_message("Этот пользователь не состоит в браке.", ephemeral=True)
             return
 
-        proposer = await self._safe_fetch_user(int(marriage["proposer_id"]))
-        partner = await self._safe_fetch_user(int(marriage["partner_id"]))
-        proposer_mention = self._mention(int(marriage["proposer_id"]), proposer)
-        partner_mention = self._mention(int(marriage["partner_id"]), partner)
-        embed = discord.Embed(title="💑 Информация о паре", color=WEDDING_COLOR, timestamp=utcnow())
-        embed.add_field(name="Участники пары", value=f"{proposer_mention} + {partner_mention}", inline=False)
-        embed.add_field(name="Дата свадьбы", value=format_dt(marriage["married_at"]), inline=True)
-        embed.add_field(name="Сколько дней вместе", value=f"{days_together(marriage['married_at'])} дн.", inline=True)
-        embed.add_field(name="Статус", value="В браке", inline=True)
-        thumb_user = partner or proposer
-        if thumb_user is not None:
-            embed.set_thumbnail(url=thumb_user.display_avatar.url)
+        embed = await self.build_couple_embed(marriage)
         await interaction.response.send_message(embed=embed)
+
+
+    @app_commands.command(name="отношения", description="Открыть меню развития отношений пары")
+    async def relationships(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
+            return
+        if interaction.user.bot:
+            await interaction.response.send_message("Боты не могут развивать отношения.", ephemeral=True)
+            return
+        marriage = await self.get_active_marriage(interaction.guild.id, interaction.user.id)
+        if marriage is None:
+            await interaction.response.send_message("Вы не состоите в браке.", ephemeral=True)
+            return
+        embed = await self.build_relationship_menu_embed(marriage)
+        view = RelationshipMenuView(self, interaction.user.id, interaction.guild.id, int(marriage["id"]))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @app_commands.command(name="топ_отношений", description="Топ пар по развитию отношений")
+    async def relationship_top(self, interaction: discord.Interaction) -> None:
+        await self.send_relationship_top(interaction)
 
     @app_commands.command(name="топ_пар", description="Топ пар по длительности брака")
     async def top_couples(self, interaction: discord.Interaction) -> None:
@@ -627,11 +1223,47 @@ class WeddingsCog(commands.Cog):
                 f"Вместе: {days_together(longest['married_at'])} дн."
             )
 
+        cursor = await db.execute(
+            """
+            SELECT * FROM wedding_marriages
+            WHERE guild_id = ? AND divorced_at IS NULL
+            ORDER BY relationship_level DESC, relationship_xp DESC, relationship_streak_days DESC, married_at ASC
+            LIMIT 1
+            """,
+            (guild_id,),
+        )
+        most_developed = await cursor.fetchone()
+        if most_developed is None:
+            most_developed_text = "Пока нет активных пар."
+        else:
+            proposer = await self._safe_fetch_user(int(most_developed["proposer_id"]))
+            partner = await self._safe_fetch_user(int(most_developed["partner_id"]))
+            level = int(most_developed["relationship_level"] or 1)
+            most_developed_text = (
+                f"{self._mention(int(most_developed['proposer_id']), proposer)} + "
+                f"{self._mention(int(most_developed['partner_id']), partner)}\n"
+                f"Уровень {level} — {get_relationship_level_title(level)} · "
+                f"{int(most_developed['relationship_xp'] or 0)} XP"
+            )
+
+        cursor = await db.execute(
+            """
+            SELECT AVG(relationship_level) AS value
+            FROM wedding_marriages
+            WHERE guild_id = ? AND divorced_at IS NULL
+            """,
+            (guild_id,),
+        )
+        avg_row = await cursor.fetchone()
+        avg_level = float(avg_row["value"] or 0) if avg_row is not None else 0.0
+
         embed = discord.Embed(title="📊 Статистика свадеб", color=GOLD_COLOR, timestamp=utcnow())
         embed.add_field(name="Активных браков", value=str(stats["active"]), inline=True)
         embed.add_field(name="Всего свадеб за всё время", value=str(stats["total"]), inline=True)
         embed.add_field(name="Всего разводов", value=str(stats["divorces"]), inline=True)
+        embed.add_field(name="Средний уровень отношений", value=f"{avg_level:.1f}", inline=True)
         embed.add_field(name="Самая долгая активная пара", value=longest_text, inline=False)
+        embed.add_field(name="Самая развитая активная пара", value=most_developed_text, inline=False)
         await interaction.response.send_message(embed=embed)
 
 
