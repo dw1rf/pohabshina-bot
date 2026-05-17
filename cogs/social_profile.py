@@ -13,6 +13,7 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from services.social_game_service import utcnow_iso
+from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -381,9 +382,9 @@ class SocialProfileCog(commands.Cog):
             embed = await self._profile_embed(interaction.guild, interaction.user) or self._not_enough_embed(interaction.user)
         view = ProfileMenuView(self, interaction.user.id)
         if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=view)
+            await interaction.edit_original_response(embed=embed, view=view, attachments=[])
         else:
-            await interaction.response.edit_message(embed=embed, view=view)
+            await interaction.response.edit_message(embed=embed, view=view, attachments=[])
 
     async def show_evolution(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or self.bot.db is None:
@@ -409,12 +410,27 @@ class SocialProfileCog(commands.Cog):
         if interaction.guild is None or self.bot.db is None:
             await interaction.response.send_message("Только на сервере.", ephemeral=True)
             return
-        text = await self._edges_text(interaction.guild.id, interaction.user.id)
-        embed = discord.Embed(title="🕸️ Связи", description=text or "Недостаточно данных", color=discord.Color.dark_teal())
-        embed.set_footer(text=DISCLAIMER)
-        await interaction.response.edit_message(embed=embed, view=ProfileBackView(self, interaction.user.id))
+        await interaction.response.defer()
+        try:
+            payload = await self._social_graph_payload(interaction.guild, interaction.user.id)
+        except Exception:
+            logger.exception("Failed to generate social graph image")
+            await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
+            return
+        if payload is None:
+            embed = discord.Embed(title="Связи", description="Недостаточно данных", color=discord.Color.light_grey())
+            embed.set_footer(text=DISCLAIMER)
+            await interaction.edit_original_response(embed=embed, view=ProfileBackView(self, interaction.user.id), attachments=[])
+            return
+        embed, file = payload
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ProfileBackView(self, interaction.user.id),
+            attachments=[file],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
-    async def _edges_text(self, guild_id: int, user_id: int) -> str | None:
+    async def _social_graph_payload(self, guild: discord.Guild, user_id: int) -> tuple[discord.Embed, discord.File] | None:
         assert self.bot.db is not None
         cur = await self.bot.db.execute(
             """
@@ -425,13 +441,33 @@ class SocialProfileCog(commands.Cog):
             ORDER BY (e.reply_count*2 + e.mention_count + e.shared_channel_count) DESC
             LIMIT 5
             """,
-            (guild_id, user_id),
+            (guild.id, user_id),
         )
         rows = await cur.fetchall()
         if not rows:
             return None
-        max_score = max(1, max(r["reply_count"]*2 + r["mention_count"] + r["shared_channel_count"] for r in rows))
-        return "\n".join(f"<@{r['other_user_id']}> — {int((r['reply_count']*2 + r['mention_count'] + r['shared_channel_count'])/max_score*100)}%: ответы/упоминания" for r in rows)
+
+        max_score = max(1, max(r["reply_count"] * 2 + r["mention_count"] + r["shared_channel_count"] for r in rows))
+        leaderboard_rows: list[LeaderboardImageRow] = []
+        for row in rows:
+            score = int(row["reply_count"] * 2 + row["mention_count"] + row["shared_channel_count"])
+            percent = int(score / max_score * 100)
+            name = await resolve_display_name(self.bot, guild, int(row["other_user_id"]), max_len=34)
+            leaderboard_rows.append(
+                LeaderboardImageRow(
+                    name=name,
+                    primary=f"Связь {percent}%",
+                    secondary=f"Ответы {int(row['reply_count'])}  Упоминания {int(row['mention_count'])}  Общие каналы {int(row['shared_channel_count'])}",
+                    value=score,
+                )
+            )
+
+        filename = "profile_social_graph.png"
+        file = make_leaderboard_file("СВЯЗИ ПРОФИЛЯ", leaderboard_rows, filename=filename)
+        embed = discord.Embed(title="Связи", color=discord.Color.dark_teal())
+        embed.set_footer(text=DISCLAIMER)
+        embed.set_image(url=f"attachment://{filename}")
+        return embed, file
 
     async def answer_clone(self, interaction: discord.Interaction, question: str) -> None:
         if interaction.guild is None or self.bot.db is None:

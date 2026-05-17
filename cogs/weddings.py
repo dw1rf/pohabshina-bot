@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -11,9 +10,9 @@ import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
 
 from bot_client import MovieBot
+from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -84,79 +83,6 @@ def _format_timedelta_ru(delta: timedelta) -> str:
             return f"{hours} ч. {minutes} мин."
         return f"{hours} ч."
     return f"{total_minutes} мин."
-
-
-def _load_relationship_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-    ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _truncate_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
-    if draw.textlength(text, font=font) <= max_width:
-        return text
-    suffix = "…"
-    while text and draw.textlength(text + suffix, font=font) > max_width:
-        text = text[:-1]
-    return text + suffix if text else suffix
-
-
-def generate_relationship_top_image(rows: list[aiosqlite.Row], users_cache: dict[int, str]) -> io.BytesIO:
-    width = 900
-    row_height = 112
-    height = 125 + max(len(rows), 1) * row_height
-    image = Image.new("RGB", (width, height), (27, 29, 40))
-    draw = ImageDraw.Draw(image)
-
-    title_font = _load_relationship_font(36, bold=True)
-    name_font = _load_relationship_font(24, bold=True)
-    meta_font = _load_relationship_font(20)
-    small_font = _load_relationship_font(16)
-
-    draw.rounded_rectangle((20, 20, width - 20, height - 20), radius=28, fill=(35, 38, 52), outline=(255, 105, 180), width=2)
-    draw.text((48, 42), "🏆 Топ отношений сервера", fill=(255, 226, 128), font=title_font)
-
-    max_xp = max((int(row["relationship_xp"]) for row in rows), default=1)
-    max_xp = max(max_xp, 1)
-    y = 105
-    for index, row in enumerate(rows, start=1):
-        card_color = (44, 48, 65) if index % 2 else (39, 43, 59)
-        draw.rounded_rectangle((48, y, width - 48, y + 92), radius=18, fill=card_color)
-        place_color = (255, 215, 0) if index == 1 else (210, 210, 220)
-        draw.text((72, y + 18), f"#{index}", fill=place_color, font=name_font)
-
-        proposer_id = int(row["proposer_id"])
-        partner_id = int(row["partner_id"])
-        names = f"{users_cache.get(proposer_id, str(proposer_id))} + {users_cache.get(partner_id, str(partner_id))}"
-        names = _truncate_text(draw, names, name_font, 540)
-        level = int(row["relationship_level"])
-        xp = int(row["relationship_xp"])
-        streak = int(row["relationship_streak_days"])
-        draw.text((145, y + 13), names, fill=(245, 246, 255), font=name_font)
-        meta = f"Уровень {level} — {get_relationship_level_title(level)} · {xp} XP · 🔥 {streak} дн."
-        draw.text((145, y + 48), meta, fill=(196, 202, 220), font=meta_font)
-
-        bar_x, bar_y, bar_w, bar_h = 145, y + 76, 660, 10
-        draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=5, fill=(71, 76, 96))
-        filled = int(bar_w * (xp / max_xp))
-        if filled > 0:
-            draw.rounded_rectangle((bar_x, bar_y, bar_x + filled, bar_y + bar_h), radius=5, fill=(255, 105, 180))
-        draw.text((815, y + 68), f"{int(xp / max_xp * 100)}%", fill=(180, 185, 205), font=small_font)
-        y += row_height
-
-    output = io.BytesIO()
-    image.save(output, format="PNG")
-    output.seek(0)
-    return output
 
 
 def utcnow() -> datetime:
@@ -812,47 +738,33 @@ class WeddingsCog(commands.Cog):
 
     async def build_relationship_top_payload(
         self, guild_id: int
-    ) -> tuple[discord.Embed, discord.File | None]:
+    ) -> tuple[discord.Embed, discord.File] | None:
         rows = await self.get_relationship_top_rows(guild_id)
         if not rows:
-            return discord.Embed(
-                title="🏆 Топ отношений",
-                description="Пока нет активных пар.",
-                color=GOLD_COLOR,
-                timestamp=utcnow(),
-            ), None
+            return None
 
-        users_cache: dict[int, str] = {}
-        lines: list[str] = []
-        for index, row in enumerate(rows, start=1):
-            proposer = await self._safe_fetch_user(int(row["proposer_id"]))
-            partner = await self._safe_fetch_user(int(row["partner_id"]))
-            proposer_name = proposer.display_name if proposer is not None else str(row["proposer_id"])
-            partner_name = partner.display_name if partner is not None else str(row["partner_id"])
-            users_cache[int(row["proposer_id"])] = proposer_name
-            users_cache[int(row["partner_id"])] = partner_name
+        guild = self.bot.get_guild(guild_id)
+        leaderboard_rows: list[LeaderboardImageRow] = []
+        for row in rows:
+            proposer_name = await resolve_display_name(self.bot, guild, int(row["proposer_id"]), max_len=28)
+            partner_name = await resolve_display_name(self.bot, guild, int(row["partner_id"]), max_len=28)
             level = int(row["relationship_level"] or 1)
-            lines.append(
-                f"#{index} — {self._mention(int(row['proposer_id']), proposer)} + "
-                f"{self._mention(int(row['partner_id']), partner)}\n"
-                f"Уровень {level} · {int(row['relationship_xp'] or 0)} XP · "
-                f"серия {int(row['relationship_streak_days'] or 0)} дн."
+            xp = int(row["relationship_xp"] or 0)
+            streak = int(row["relationship_streak_days"] or 0)
+            leaderboard_rows.append(
+                LeaderboardImageRow(
+                    name=f"{proposer_name} + {partner_name}",
+                    primary=f"Уровень {level}  XP {xp}",
+                    secondary=f"Серия {streak} дн.",
+                    value=xp,
+                )
             )
 
-        embed = discord.Embed(
-            title="🏆 Топ отношений",
-            description="\n\n".join(lines),
-            color=GOLD_COLOR,
-            timestamp=utcnow(),
-        )
-        try:
-            image = generate_relationship_top_image(rows, users_cache)
-            file = discord.File(image, filename="relationship_top.png")
-            embed.set_image(url="attachment://relationship_top.png")
-            return embed, file
-        except Exception:
-            logger.exception("Failed to generate relationship top image")
-            return embed, None
+        filename = "relationship_top.png"
+        file = make_leaderboard_file("ТОП ОТНОШЕНИЙ", leaderboard_rows, filename=filename)
+        embed = discord.Embed(title="Топ отношений", color=GOLD_COLOR, timestamp=utcnow())
+        embed.set_image(url=f"attachment://{filename}")
+        return embed, file
 
     async def send_relationship_top(self, interaction: discord.Interaction, *, public: bool = False) -> None:
         if interaction.guild is None:
@@ -861,10 +773,24 @@ class WeddingsCog(commands.Cog):
             else:
                 await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
             return
-        embed, file = await self.build_relationship_top_payload(interaction.guild.id)
-        kwargs: dict[str, Any] = {"embed": embed}
-        if file is not None:
-            kwargs["file"] = file
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        try:
+            payload = await self.build_relationship_top_payload(interaction.guild.id)
+        except Exception:
+            logger.exception("Failed to generate relationship top image")
+            await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
+            return
+        if payload is None:
+            await interaction.followup.send("Пока нет данных для топа.", ephemeral=True)
+            return
+
+        embed, file = payload
+        kwargs: dict[str, Any] = {
+            "embed": embed,
+            "file": file,
+            "allowed_mentions": discord.AllowedMentions.none(),
+        }
         if public and interaction.channel is not None:
             await interaction.channel.send(**kwargs)
             await interaction.followup.send("Топ отношений отправлен в канал.", ephemeral=True)
@@ -1166,23 +1092,35 @@ class WeddingsCog(commands.Cog):
             await interaction.response.send_message("Пока нет активных пар.", ephemeral=True)
             return
 
-        lines: list[str] = []
-        for index, row in enumerate(rows, start=1):
-            proposer = await self._safe_fetch_user(int(row["proposer_id"]))
-            partner = await self._safe_fetch_user(int(row["partner_id"]))
-            lines.append(
-                f"#{index} — {self._mention(int(row['proposer_id']), proposer)} + "
-                f"{self._mention(int(row['partner_id']), partner)}\n"
-                f"Вместе: {days_together(row['married_at'])} дн."
+        await interaction.response.defer()
+        leaderboard_rows: list[LeaderboardImageRow] = []
+        for row in rows:
+            proposer_name = await resolve_display_name(self.bot, interaction.guild, int(row["proposer_id"]), max_len=28)
+            partner_name = await resolve_display_name(self.bot, interaction.guild, int(row["partner_id"]), max_len=28)
+            days = days_together(row["married_at"])
+            leaderboard_rows.append(
+                LeaderboardImageRow(
+                    name=f"{proposer_name} + {partner_name}",
+                    primary=f"Вместе {days} дн.",
+                    value=max(days, 1),
+                )
             )
 
-        embed = discord.Embed(
-            title="🏆 Топ пар по длительности брака",
-            description="\n\n".join(lines),
-            color=GOLD_COLOR,
-            timestamp=utcnow(),
+        try:
+            filename = "couples_top.png"
+            file = make_leaderboard_file("ТОП ПАР ПО ДЛИТЕЛЬНОСТИ БРАКА", leaderboard_rows, filename=filename)
+            embed = discord.Embed(title="Топ пар", color=GOLD_COLOR, timestamp=utcnow())
+            embed.set_image(url=f"attachment://{filename}")
+        except Exception:
+            logger.exception("Failed to generate couples top image")
+            await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            embed=embed,
+            file=file,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
-        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="браки_статистика", description="Статистика свадеб на сервере")
     async def wedding_stats(self, interaction: discord.Interaction) -> None:

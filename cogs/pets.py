@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import discord
@@ -9,6 +10,9 @@ from discord.ext import commands
 from bot_client import MovieBot
 from cogs.social_game_content import PET_TYPES
 from services.social_game_service import utcnow_iso
+from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
+
+logger = logging.getLogger(__name__)
 
 
 def clamp(value: int) -> int:
@@ -112,8 +116,23 @@ class PetMenuView(discord.ui.View):
 
     @discord.ui.button(label="🏆 Топ", style=discord.ButtonStyle.secondary, row=2)
     async def top(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        embed = await self.cog.top_embed(interaction)
-        await interaction.response.edit_message(embed=embed, view=PetBackView(self.cog, self.owner_id))
+        await interaction.response.defer()
+        try:
+            payload = await self.cog.top_payload(interaction)
+        except Exception:
+            logger.exception("Failed to generate pets top image")
+            await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
+            return
+        if payload is None:
+            await interaction.followup.send("Пока нет данных для топа.", ephemeral=True)
+            return
+        embed, file = payload
+        await interaction.edit_original_response(
+            embed=embed,
+            view=PetBackView(self.cog, self.owner_id),
+            attachments=[file],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @discord.ui.button(label="🔄 Обновить", style=discord.ButtonStyle.secondary, row=2)
     async def refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -206,9 +225,9 @@ class PetsCog(commands.Cog):
         embed = self.menu_embed(interaction.user, pet)
         view = PetMenuView(self, interaction.user.id, has_pet=bool(pet))
         if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=view)
+            await interaction.edit_original_response(embed=embed, view=view, attachments=[])
         else:
-            await interaction.response.edit_message(embed=embed, view=view)
+            await interaction.response.edit_message(embed=embed, view=view, attachments=[])
 
     async def _reply(self, interaction: discord.Interaction, content: str, *, ephemeral: bool = False) -> None:
         if interaction.response.is_done():
@@ -274,12 +293,33 @@ class PetsCog(commands.Cog):
         await self.bot.db.commit()
         await self.refresh_menu(interaction)
 
-    async def top_embed(self, interaction: discord.Interaction) -> discord.Embed:
+    async def top_payload(self, interaction: discord.Interaction) -> tuple[discord.Embed, discord.File] | None:
         assert interaction.guild is not None and self.bot.db is not None
-        cur = await self.bot.db.execute("SELECT owner_id, name, level, xp FROM pets WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10", (interaction.guild.id,))
+        cur = await self.bot.db.execute("SELECT owner_id, name, level, xp, streak FROM pets WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10", (interaction.guild.id,))
         rows = await cur.fetchall()
-        text = "\n".join(f"{i}. <@{r['owner_id']}> — {r['name']}, ур. {r['level']}" for i, r in enumerate(rows, 1)) or "Питомцев пока нет."
-        return discord.Embed(title="🏆 Топ питомцев", description=text, color=discord.Color.gold())
+        if not rows:
+            return None
+
+        leaderboard_rows: list[LeaderboardImageRow] = []
+        for row in rows:
+            level = int(row["level"])
+            xp = int(row["xp"])
+            streak = int(row["streak"] or 0)
+            owner_name = await resolve_display_name(self.bot, interaction.guild, int(row["owner_id"]), max_len=34)
+            leaderboard_rows.append(
+                LeaderboardImageRow(
+                    name=str(row["name"]),
+                    primary=f"Владелец: {owner_name}",
+                    secondary=f"Уровень {level}  XP {xp}  streak {streak}",
+                    value=level * 1000 + xp,
+                )
+            )
+
+        filename = "pets_top.png"
+        file = make_leaderboard_file("ТОП ПИТОМЦЕВ", leaderboard_rows, filename=filename)
+        embed = discord.Embed(title="Топ питомцев", color=discord.Color.gold())
+        embed.set_image(url=f"attachment://{filename}")
+        return embed, file
 
     @app_commands.command(name="pet", description="Открыть меню виртуального питомца")
     async def pet(self, interaction: discord.Interaction) -> None:
