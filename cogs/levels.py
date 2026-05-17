@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import discord
@@ -8,6 +9,9 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from utils.helpers import required_messages_for_level
+from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
+
+logger = logging.getLogger(__name__)
 
 
 class LevelsCog(commands.Cog):
@@ -69,16 +73,38 @@ class LevelsCog(commands.Cog):
             return
         rows = await self.bot.levels.get_top(self.bot.db, guild.id, limit=10)
         if not rows:
-            await interaction.response.send_message("Пока нет данных по сообщениям.", ephemeral=True)
+            await interaction.response.send_message("Пока нет данных для топа.", ephemeral=True)
             return
 
-        lines: list[str] = []
-        for i, row in enumerate(rows, start=1):
-            member = guild.get_member(int(row["user_id"]))
-            name = member.mention if member else f"<@{int(row['user_id'])}>"
-            lines.append(f"**{i}.** {name} — ур. {row['level']} • {row['message_count']} сообщений")
-        await interaction.response.send_message(
-            embed=discord.Embed(title="🏆 Топ участников по уровням", description="\n".join(lines), color=discord.Color.purple())
+        await interaction.response.defer()
+        leaderboard_rows: list[LeaderboardImageRow] = []
+        for row in rows:
+            level = int(row["level"])
+            message_count = int(row["message_count"])
+            name = await resolve_display_name(self.bot, guild, int(row["user_id"]))
+            leaderboard_rows.append(
+                LeaderboardImageRow(
+                    name=name,
+                    primary=f"Уровень {level}",
+                    secondary=f"{message_count} сообщений",
+                    value=message_count,
+                )
+            )
+
+        try:
+            filename = "levels_top.png"
+            file = make_leaderboard_file("ТОП УРОВНЕЙ", leaderboard_rows, filename=filename)
+            embed = discord.Embed(title="Топ уровней", color=discord.Color.purple())
+            embed.set_image(url=f"attachment://{filename}")
+        except Exception:
+            logger.exception("Failed to generate levels top image")
+            await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
+            return
+
+        await interaction.followup.send(
+            embed=embed,
+            file=file,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
 

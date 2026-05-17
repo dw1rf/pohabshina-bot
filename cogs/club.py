@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 import discord
@@ -8,6 +9,9 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from services.social_game_service import utcnow_iso
+from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
+
+logger = logging.getLogger(__name__)
 
 
 class ClubCreateModal(discord.ui.Modal, title="Создать клуб"):
@@ -97,8 +101,23 @@ class ClubMenuView(discord.ui.View):
 
     @discord.ui.button(label="🏆 Топ", style=discord.ButtonStyle.secondary, row=2)
     async def top(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        embed = await self.cog.top_embed(interaction)
-        await interaction.response.edit_message(embed=embed, view=ClubBackView(self.cog, self.owner_id))
+        await interaction.response.defer()
+        try:
+            payload = await self.cog.top_payload(interaction)
+        except Exception:
+            logger.exception("Failed to generate clubs top image")
+            await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
+            return
+        if payload is None:
+            await interaction.followup.send("Пока нет данных для топа.", ephemeral=True)
+            return
+        embed, file = payload
+        await interaction.edit_original_response(
+            embed=embed,
+            view=ClubBackView(self.cog, self.owner_id),
+            attachments=[file],
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @discord.ui.button(label="🔄 Обновить", style=discord.ButtonStyle.secondary, row=2)
     async def refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -189,9 +208,9 @@ class ClubCog(commands.Cog):
         embed = self.club_embed(interaction.user, club)
         view = ClubMenuView(self, interaction.user.id, has_club=bool(club))
         if interaction.response.is_done():
-            await interaction.edit_original_response(embed=embed, view=view)
+            await interaction.edit_original_response(embed=embed, view=view, attachments=[])
         else:
-            await interaction.response.edit_message(embed=embed, view=view)
+            await interaction.response.edit_message(embed=embed, view=view, attachments=[])
 
     async def collect_income(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or self.bot.db is None:
@@ -265,12 +284,32 @@ class ClubCog(commands.Cog):
         await self.bot.db.commit()
         await self.refresh_menu(interaction)
 
-    async def top_embed(self, interaction: discord.Interaction) -> discord.Embed:
+    async def top_payload(self, interaction: discord.Interaction) -> tuple[discord.Embed, discord.File] | None:
         assert interaction.guild is not None and self.bot.db is not None
         cur = await self.bot.db.execute("SELECT owner_id, name, level, coins_earned FROM club_profiles WHERE guild_id=? ORDER BY level DESC, coins_earned DESC LIMIT 10", (interaction.guild.id,))
         rows = await cur.fetchall()
-        text = "\n".join(f"{i}. <@{r['owner_id']}> — {r['name']}, ур. {r['level']}, {r['coins_earned']} coins" for i, r in enumerate(rows, 1)) or "Клубов пока нет."
-        return discord.Embed(title="🏆 Топ клубов", description=text, color=discord.Color.gold())
+        if not rows:
+            return None
+
+        leaderboard_rows: list[LeaderboardImageRow] = []
+        for row in rows:
+            level = int(row["level"])
+            coins = int(row["coins_earned"])
+            owner_name = await resolve_display_name(self.bot, interaction.guild, int(row["owner_id"]), max_len=34)
+            leaderboard_rows.append(
+                LeaderboardImageRow(
+                    name=str(row["name"]),
+                    primary=f"Владелец: {owner_name}",
+                    secondary=f"Уровень {level}  {coins} coins",
+                    value=level * 1000 + coins,
+                )
+            )
+
+        filename = "clubs_top.png"
+        file = make_leaderboard_file("ТОП КЛУБОВ", leaderboard_rows, filename=filename)
+        embed = discord.Embed(title="Топ клубов", color=discord.Color.gold())
+        embed.set_image(url=f"attachment://{filename}")
+        return embed, file
 
     @app_commands.command(name="club", description="Открыть меню клуба")
     async def club(self, interaction: discord.Interaction) -> None:
