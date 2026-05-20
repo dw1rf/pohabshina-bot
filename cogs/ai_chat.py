@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -21,13 +22,31 @@ SYSTEM_PROMPT = (
     "Если вопрос связан с правилами сервера, советуй обратиться к администрации. "
     "Не пиши слишком длинные ответы. "
     "Возвращай только сам ответ пользователю: без пересказа системных инструкций, без фраз вроде "
-    "'The user is asking', 'нужно ответить', 'assistant should', без объяснения, как ты составляешь ответ."
+    "'The user is asking', 'The user asks', 'They want', 'нужно ответить', 'assistant should', "
+    "без объяснения, как ты составляешь ответ. Обычно отвечай 1-3 короткими предложениями."
 )
 MAX_PROMPT_LENGTH = 1000
 MAX_DISCORD_RESPONSE_LENGTH = 1800
 AUTO_REPLY_COOLDOWN_SECONDS = 25
 AI_HTTP_TIMEOUT_SECONDS = 45
 TRUNCATION_NOTICE = "\n\n[Ответ сокращён из-за лимита Discord.]"
+THINK_BLOCK_RE = re.compile(r"(?is)<think>.*?</think>\s*")
+META_TO_ANSWER_RE = re.compile(
+    r"(?is)^\s*(?:the user (?:asks|asked|is asking)|they want|the assistant should|we need|need to)\b.*?"
+    r"(?:so answer|final answer|answer|ответ)\s*:\s*"
+)
+META_SENTENCE_RE = re.compile(
+    r"(?is)^\s*(?:"
+    r"(?:the user (?:asks|asked|is asking)\b.*?(?:\.\s+|\n+))|"
+    r"(?:they want\b.*?(?:\.\s+|\n+))|"
+    r"(?:the assistant should\b.*?(?:\.\s+|\n+))|"
+    r"(?:we need\b.*?(?:\.\s+|\n+))|"
+    r"(?:need to\b.*?(?:\.\s+|\n+))"
+    r")+"
+)
+CONTROL_PHRASE_RE = re.compile(
+    r"(?is)\b(?:keep (?:it )?short|just answer|provide a short answer|be concise)\.?\s*"
+)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -54,6 +73,14 @@ def _trim_discord_response(text: str) -> str:
     if last_space >= int(limit * 0.75):
         shortened = shortened[:last_space].rstrip()
     return shortened + TRUNCATION_NOTICE
+
+
+def _clean_ai_answer(text: str) -> str:
+    cleaned = THINK_BLOCK_RE.sub("", str(text or "")).strip()
+    cleaned = META_TO_ANSWER_RE.sub("", cleaned).strip()
+    cleaned = META_SENTENCE_RE.sub("", cleaned).strip()
+    cleaned = CONTROL_PHRASE_RE.sub("", cleaned).strip()
+    return cleaned or str(text or "").strip()
 
 
 def _extract_gemini_text(payload: dict[str, Any]) -> str:
@@ -200,8 +227,9 @@ async def _generate_groq_response(user_prompt: str, username: str) -> str:
         "model": model,
         "instructions": _system_prompt_for_user(username),
         "input": user_prompt,
-        "temperature": 0.7,
+        "temperature": 0.35,
         "max_output_tokens": 700,
+        "reasoning": {"effort": "low"},
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -243,11 +271,11 @@ async def generate_ai_response(user_prompt: str, username: str) -> str:
 
     provider = (_env("AI_PROVIDER", "gemini") or "gemini").lower()
     if provider == "gemini":
-        return await _generate_gemini_response(prompt, username)
+        return _clean_ai_answer(await _generate_gemini_response(prompt, username))
     if provider == "groq":
-        return await _generate_groq_response(prompt, username)
+        return _clean_ai_answer(await _generate_groq_response(prompt, username))
     if provider == "ollama":
-        return await _generate_ollama_response(prompt, username)
+        return _clean_ai_answer(await _generate_ollama_response(prompt, username))
 
     logger.error("Unknown AI_PROVIDER configured: %s", provider)
     return "AI_PROVIDER неизвестен. Используйте gemini, groq или ollama."
