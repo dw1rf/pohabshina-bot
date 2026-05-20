@@ -192,6 +192,8 @@ def _can_manage_ai_channels(user: discord.Member | discord.User) -> bool:
 
 
 class AIChatCog(commands.Cog):
+    ai_group = app_commands.Group(name="ai", description="AI-ассистент сервера")
+
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self._auto_reply_cooldowns: dict[int, float] = {}
@@ -251,19 +253,19 @@ class AIChatCog(commands.Cog):
         answer = _trim_discord_response(discord.utils.escape_mentions(answer))
         await interaction.followup.send(answer, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none())
 
-    @app_commands.command(name="ai", description="Задать вопрос AI")
+    @ai_group.command(name="ask", description="Задать вопрос AI")
     @app_commands.describe(prompt="Текст вопроса")
     @app_commands.checks.cooldown(1, AUTO_REPLY_COOLDOWN_SECONDS)
-    async def ai(self, interaction: discord.Interaction, prompt: str) -> None:
+    async def ai_ask(self, interaction: discord.Interaction, prompt: str) -> None:
         await self._send_ai_response(interaction, prompt, ephemeral=False)
 
-    @app_commands.command(name="ai_private", description="Задать вопрос AI приватно")
+    @ai_group.command(name="private", description="Задать вопрос AI приватно")
     @app_commands.describe(prompt="Текст вопроса")
     @app_commands.checks.cooldown(1, AUTO_REPLY_COOLDOWN_SECONDS)
     async def ai_private(self, interaction: discord.Interaction, prompt: str) -> None:
         await self._send_ai_response(interaction, prompt, ephemeral=True)
 
-    @app_commands.command(name="ai_channel_enable", description="Включить AI-автоответы в текущем канале")
+    @ai_group.command(name="channel_enable", description="Включить AI-автоответы в текущем канале")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.guild_only()
     async def ai_channel_enable(self, interaction: discord.Interaction) -> None:
@@ -277,7 +279,7 @@ class AIChatCog(commands.Cog):
         await self._set_ai_channel(interaction.guild.id, interaction.channel_id, True)
         await interaction.response.send_message("AI-автоответы включены в этом канале.", ephemeral=True)
 
-    @app_commands.command(name="ai_channel_disable", description="Выключить AI-автоответы в текущем канале")
+    @ai_group.command(name="channel_disable", description="Выключить AI-автоответы в текущем канале")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.guild_only()
     async def ai_channel_disable(self, interaction: discord.Interaction) -> None:
