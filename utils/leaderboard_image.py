@@ -573,9 +573,6 @@ def draw_leaderboard_image(
     brand = _clean_single_line_text(title, default="O.XY", max_len=18)
     brand_width = _text_length(draw, brand, micro_font)
     _draw_text(draw, (int(width / 2 - brand_width / 2), panel_y + 38), brand, fill=(240, 240, 255, 206), font=micro_font)
-    _draw_text(draw, (panel_x + 34, panel_y + 76), "T.ME/LINK", fill=(238, 239, 248, 218), font=micro_font)
-    right_label = "DISCORD.GG/LINK"
-    _draw_text(draw, (panel_x + panel_w - 34 - int(_text_length(draw, right_label, micro_font)), panel_y + 76), right_label, fill=(238, 239, 248, 218), font=micro_font)
 
     table_y = panel_y + top_area
     table_x = panel_x + 32
@@ -592,15 +589,13 @@ def draw_leaderboard_image(
         "rank": table_x + 38,
         "avatar": table_x + 190,
         "name": table_x + 238,
-        "tier": table_x + int(table_w * 0.46),
-        "content": table_x + int(table_w * 0.64),
-        "reward": table_x + int(table_w * 0.74),
-        "score": table_x + int(table_w * 0.875),
+        "content": table_x + int(table_w * 0.55),
+        "reward": table_x + int(table_w * 0.70),
+        "score": table_x + int(table_w * 0.84),
     }
     headers = [
         ("//RANK", columns["rank"]),
         ("//CHAMPIONS", table_x + 170),
-        ("//TIER", columns["tier"]),
         ("//CONTENT", columns["content"]),
         ("//REWARD", columns["reward"]),
         ("//SCORE", columns["score"]),
@@ -608,7 +603,7 @@ def draw_leaderboard_image(
     for label, x in headers:
         _draw_text(draw, (x, table_y + 56), label, fill=(161, 159, 166, 225), font=header_font)
 
-    for x in [columns["tier"] - 28, columns["content"] - 28, columns["reward"] - 28, columns["score"] - 28]:
+    for x in [columns["content"] - 28, columns["reward"] - 28, columns["score"] - 28]:
         draw.line((x, table_y + 2, x, table_bottom - 2), fill=(255, 255, 255, 11), width=1)
 
     values = [max(float(row.value), 0.0) for row in safe_rows]
@@ -618,19 +613,16 @@ def draw_leaderboard_image(
             "fill": (86, 78, 17, 142),
             "rank": (238, 199, 87, 255),
             "line": (232, 189, 76, 116),
-            "tier": "OMNI",
         },
         2: {
             "fill": (111, 108, 122, 118),
             "rank": (214, 217, 229, 255),
             "line": (186, 190, 207, 96),
-            "tier": "ORBIT, OMNI",
         },
         3: {
             "fill": (98, 44, 18, 132),
             "rank": (215, 149, 82, 255),
             "line": (222, 120, 58, 100),
-            "tier": "ORBIT, OMNI",
         },
     }
 
@@ -656,25 +648,20 @@ def draw_leaderboard_image(
         if index <= 3:
             _draw_avatar_orb(draw, (columns["avatar"], y + row_height // 2), index)
 
-        name_max_width = columns["tier"] - columns["name"] - 46
+        name_max_width = columns["content"] - columns["name"] - 46
         name = _fit_text(draw, sanitize_leaderboard_name(row.name), name_font, name_max_width)
         name_x = columns["name"]
         if index <= 3:
             _draw_text(draw, (name_x, y + 17), "[", fill=(220, 220, 226, 175), font=name_font)
             _draw_text(draw, (name_x + 24, y + 17), name, fill=(250, 249, 255, 255), font=name_font)
             name_end = name_x + 38 + int(_text_length(draw, name, name_font))
-            _draw_text(draw, (min(name_end, columns["tier"] - 34), y + 17), "]", fill=(220, 220, 226, 175), font=name_font)
+            _draw_text(draw, (min(name_end, columns["content"] - 34), y + 17), "]", fill=(220, 220, 226, 175), font=name_font)
         else:
             _draw_text(draw, (name_x, y + 17), name, fill=(238, 238, 242, 245), font=name_font)
 
-        tier = style["tier"] if style else "ORBIT, OMNI"
-        tier = _fit_text(draw, tier, meta_font, columns["content"] - columns["tier"] - 42)
-        tier_fill = (246, 246, 248, 255) if index <= 3 else (155, 155, 162, 236)
-        _draw_text(draw, (columns["tier"], y + 18), tier, fill=tier_fill, font=meta_font)
-
-        primary = _fit_text(draw, safe_text(row.primary, max_len=44), meta_font, columns["reward"] - columns["content"] - 42) if row.primary else "-"
+        primary = _fit_text(draw, safe_text(row.primary, max_len=44), meta_font, columns["reward"] - columns["content"] - 28) if row.primary else "-"
         secondary = _fit_text(draw, safe_text(row.secondary, max_len=44), meta_font, columns["score"] - columns["reward"] - 62) if row.secondary else "-"
-        _draw_text(draw, (columns["content"] + 34, y + 18), primary, fill=(236, 236, 240, 238), font=meta_font)
+        _draw_text(draw, (columns["content"], y + 18), primary, fill=(236, 236, 240, 238), font=meta_font)
         _draw_text(draw, (columns["reward"], y + 18), secondary, fill=(197, 242, 190, 250), font=meta_font)
         draw.ellipse((columns["reward"] + int(_text_length(draw, secondary, meta_font)) + 13, y + 22, columns["reward"] + int(_text_length(draw, secondary, meta_font)) + 27, y + 36), outline=(224, 236, 226, 220), width=2)
 
