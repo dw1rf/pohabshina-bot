@@ -15,6 +15,7 @@ from mcstatus import JavaServer
 from config import Settings
 from services.level_service import LevelService
 from services.reputation_service import ReputationService
+from services.reaction_ban_service import ReactionBanService
 from services.reaction_role_service import ReactionRoleService
 from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
@@ -37,6 +38,7 @@ class MovieBot(commands.Bot):
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
         self.reputation = ReputationService()
+        self.reaction_bans = ReactionBanService()
         self.reaction_roles = ReactionRoleService()
         self.support_tickets = SupportTicketService()
         self.social_games = SocialGameService()
@@ -104,6 +106,7 @@ class MovieBot(commands.Bot):
 
         await self.levels.init_db(self.db)
         await self.reputation.init_rep_db(self.db)
+        await self.reaction_bans.init_db(self.db)
         await self.reaction_roles.init_db(self.db)
         await self.support_tickets.init_db(self.db)
         await self.social_games.init_db(self.db)
