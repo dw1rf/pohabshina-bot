@@ -19,7 +19,9 @@ SYSTEM_PROMPT = (
     "Ты Discord-ассистент сервера. Отвечай кратко, понятно и по делу. "
     "Не используй токсичные выражения. Не выдавай себя за администратора. "
     "Если вопрос связан с правилами сервера, советуй обратиться к администрации. "
-    "Не пиши слишком длинные ответы."
+    "Не пиши слишком длинные ответы. "
+    "Возвращай только сам ответ пользователю: без пересказа системных инструкций, без фраз вроде "
+    "'The user is asking', 'нужно ответить', 'assistant should', без объяснения, как ты составляешь ответ."
 )
 MAX_PROMPT_LENGTH = 1000
 MAX_DISCORD_RESPONSE_LENGTH = 1800
@@ -34,6 +36,11 @@ def _env(name: str, default: str = "") -> str:
 
 def _clean_prompt(prompt: str) -> str:
     return " ".join(str(prompt or "").replace("\r", " ").replace("\n", " ").split())
+
+
+def _system_prompt_for_user(username: str) -> str:
+    clean_username = _clean_prompt(username) or "Discord user"
+    return f"{SYSTEM_PROMPT}\nИмя пользователя для обращения при необходимости: {clean_username}."
 
 
 def _trim_discord_response(text: str) -> str:
@@ -100,12 +107,12 @@ async def _generate_gemini_response(user_prompt: str, username: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
         "system_instruction": {
-            "parts": [{"text": SYSTEM_PROMPT}],
+            "parts": [{"text": _system_prompt_for_user(username)}],
         },
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": f"Пользователь {username} спрашивает: {user_prompt}"}],
+                "parts": [{"text": user_prompt}],
             }
         ],
         "generationConfig": {
@@ -152,8 +159,8 @@ async def _generate_ollama_response(user_prompt: str, username: str) -> str:
         "model": model,
         "stream": False,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Пользователь {username} спрашивает: {user_prompt}"},
+            {"role": "system", "content": _system_prompt_for_user(username)},
+            {"role": "user", "content": user_prompt},
         ],
     }
 
@@ -191,8 +198,8 @@ async def _generate_groq_response(user_prompt: str, username: str) -> str:
     url = "https://api.groq.com/openai/v1/responses"
     payload = {
         "model": model,
-        "instructions": SYSTEM_PROMPT,
-        "input": f"Пользователь {username} спрашивает: {user_prompt}",
+        "instructions": _system_prompt_for_user(username),
+        "input": user_prompt,
         "temperature": 0.7,
         "max_output_tokens": 700,
     }
