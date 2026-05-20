@@ -60,6 +60,20 @@ def _extract_gemini_text(payload: dict[str, Any]) -> str:
     return "\n".join(parts).strip()
 
 
+def _extract_openai_response_text(payload: dict[str, Any]) -> str:
+    output_text = payload.get("output_text")
+    if output_text:
+        return str(output_text).strip()
+
+    parts: list[str] = []
+    for output in payload.get("output", []) or []:
+        for content in output.get("content", []) or []:
+            text = content.get("text")
+            if text:
+                parts.append(str(text))
+    return "\n".join(parts).strip()
+
+
 async def _post_json(url: str, *, headers: dict[str, str] | None = None, payload: dict[str, Any]) -> tuple[int, dict[str, Any] | None, str]:
     timeout = aiohttp.ClientTimeout(total=AI_HTTP_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -167,6 +181,52 @@ async def _generate_ollama_response(user_prompt: str, username: str) -> str:
     return answer
 
 
+async def _generate_groq_response(user_prompt: str, username: str) -> str:
+    api_key = _env("GROQ_API_KEY")
+    if not api_key:
+        logger.error("AI_PROVIDER=groq, but GROQ_API_KEY is not configured")
+        return "Groq API не настроен: добавьте GROQ_API_KEY в .env."
+
+    model = _env("GROQ_MODEL", "openai/gpt-oss-20b") or "openai/gpt-oss-20b"
+    url = "https://api.groq.com/openai/v1/responses"
+    payload = {
+        "model": model,
+        "instructions": SYSTEM_PROMPT,
+        "input": f"Пользователь {username} спрашивает: {user_prompt}",
+        "temperature": 0.7,
+        "max_output_tokens": 700,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        status, data, raw_text = await _post_json(url, headers=headers, payload=payload)
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        logger.exception("Groq request failed")
+        return "AI сейчас недоступен: не удалось подключиться к Groq API."
+
+    if status == 429:
+        logger.warning("Groq rate limit response: %s", raw_text)
+        return "Groq временно ограничил запросы. Попробуйте позже."
+    if status in {401, 403}:
+        logger.error("Groq auth error %s: %s", status, raw_text)
+        return "Groq API отклонил ключ. Проверьте GROQ_API_KEY."
+    if status >= 400:
+        logger.error("Groq API error %s: %s", status, raw_text)
+        return "Groq API вернул ошибку. Попробуйте позже."
+    if not data:
+        logger.error("Groq returned an empty or invalid JSON response: %s", raw_text)
+        return "Groq вернул пустой ответ."
+
+    answer = _extract_openai_response_text(data)
+    if not answer:
+        logger.error("Groq response did not contain output text: %s", data)
+        return "Groq не вернул текстовый ответ."
+    return answer
+
+
 async def generate_ai_response(user_prompt: str, username: str) -> str:
     prompt = _clean_prompt(user_prompt)
     if not prompt:
@@ -177,11 +237,13 @@ async def generate_ai_response(user_prompt: str, username: str) -> str:
     provider = (_env("AI_PROVIDER", "gemini") or "gemini").lower()
     if provider == "gemini":
         return await _generate_gemini_response(prompt, username)
+    if provider == "groq":
+        return await _generate_groq_response(prompt, username)
     if provider == "ollama":
         return await _generate_ollama_response(prompt, username)
 
     logger.error("Unknown AI_PROVIDER configured: %s", provider)
-    return "AI_PROVIDER неизвестен. Используйте gemini или ollama."
+    return "AI_PROVIDER неизвестен. Используйте gemini, groq или ollama."
 
 
 def _can_manage_ai_channels(user: discord.Member | discord.User) -> bool:
