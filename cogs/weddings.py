@@ -347,6 +347,8 @@ class RelationshipMenuView(discord.ui.View):
 
 
 class WeddingsCog(commands.Cog):
+    wedding_group = app_commands.Group(name="wedding", description="Свадьбы и отношения")
+
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self.db: aiosqlite.Connection | None = None
@@ -976,7 +978,7 @@ class WeddingsCog(commands.Cog):
             embed.set_thumbnail(url=interaction.user.display_avatar.url)
         return embed
 
-    @app_commands.command(name="предложить", description="Сделать предложение пользователю")
+    @wedding_group.command(name="marry", description="Сделать предложение пользователю")
     @app_commands.describe(partner="Пользователь, которому вы хотите сделать предложение")
     async def propose(self, interaction: discord.Interaction, partner: discord.Member) -> None:
         if interaction.guild is None:
@@ -1015,7 +1017,7 @@ class WeddingsCog(commands.Cog):
         await interaction.response.send_message(embed=embed, view=view)
         view.message = await interaction.original_response()
 
-    @app_commands.command(name="развод", description="Расторгнуть текущий брак")
+    @wedding_group.command(name="divorce", description="Расторгнуть текущий брак")
     @app_commands.describe(reason="Причина развода")
     async def divorce(self, interaction: discord.Interaction, reason: str = "Не указана") -> None:
         if interaction.guild is None:
@@ -1036,7 +1038,7 @@ class WeddingsCog(commands.Cog):
         embed.add_field(name="Дата развода", value=format_dt(marriage["divorced_at"]), inline=True)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="пара", description="Показать информацию о паре")
+    @wedding_group.command(name="profile", description="Показать информацию о паре")
     @app_commands.describe(user="Пользователь, чью пару нужно показать")
     async def couple(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
         if interaction.guild is None:
@@ -1052,7 +1054,7 @@ class WeddingsCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
 
-    @app_commands.command(name="отношения", description="Открыть меню развития отношений пары")
+    @wedding_group.command(name="relationships", description="Открыть меню развития отношений пары")
     async def relationships(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
@@ -1068,11 +1070,11 @@ class WeddingsCog(commands.Cog):
         view = RelationshipMenuView(self, interaction.user.id, interaction.guild.id, int(marriage["id"]))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @app_commands.command(name="топ_отношений", description="Топ пар по развитию отношений")
+    @wedding_group.command(name="top_relationships", description="Топ пар по развитию отношений")
     async def relationship_top(self, interaction: discord.Interaction) -> None:
         await self.send_relationship_top(interaction)
 
-    @app_commands.command(name="топ_пар", description="Топ пар по длительности брака")
+    @wedding_group.command(name="top", description="Топ пар по длительности брака")
     async def top_couples(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
@@ -1122,7 +1124,7 @@ class WeddingsCog(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @app_commands.command(name="браки_статистика", description="Статистика свадеб на сервере")
+    @wedding_group.command(name="stats", description="Статистика свадеб на сервере")
     async def wedding_stats(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)
