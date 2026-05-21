@@ -341,6 +341,22 @@ class MusicCog(commands.Cog):
         )
         await self.bot.db.commit()
 
+    async def clear_saved_panel(self, guild_id: int) -> None:
+        self.panel_messages.pop(guild_id, None)
+        if self.bot.db is None:
+            return
+        await self.bot.db.execute(
+            """
+            UPDATE music_settings
+            SET panel_channel_id = NULL,
+                panel_message_id = NULL,
+                updated_at = ?
+            WHERE guild_id = ?
+            """,
+            (_now_iso(), guild_id),
+        )
+        await self.bot.db.commit()
+
     def voice_dependency_error(self) -> str | None:
         if self.ffmpeg_executable() is None:
             return "FFmpeg не найден. Без него я немой кусок железа. Нужен Docker image/egg с ffmpeg или пакеты static-ffmpeg/imageio-ffmpeg."
@@ -395,7 +411,11 @@ class MusicCog(commands.Cog):
                 check=False,
             )
             first_line = (completed.stdout or completed.stderr or "").splitlines()[0:1]
-            logger.info("Using FFmpeg executable: path=%s version=%s", ffmpeg_executable, first_line[0] if first_line else "unknown")
+            logger.info(
+                "Using FFmpeg executable: path=%s version=%s",
+                ffmpeg_executable,
+                first_line[0] if first_line else "unknown",
+            )
         except Exception:
             logger.exception("Failed to inspect FFmpeg executable: path=%s", ffmpeg_executable)
 
@@ -610,9 +630,11 @@ class MusicCog(commands.Cog):
                 logger.error("Cannot start track: ffmpeg executable is unavailable")
                 self.now_playing.pop(guild_id, None)
                 return False
+            logger.info("Preparing FFmpeg audio source: guild=%s ffmpeg=%s", guild_id, ffmpeg_executable)
             self.log_ffmpeg_details(ffmpeg_executable)
-            source = discord.FFmpegOpusAudio(
+            source = await discord.FFmpegOpusAudio.from_probe(
                 track.stream_url,
+                method="fallback",
                 executable=ffmpeg_executable,
                 before_options=FFMPEG_BEFORE_OPTIONS,
                 options=self.ffmpeg_audio_options(settings.volume),
@@ -727,6 +749,9 @@ class MusicCog(commands.Cog):
         try:
             message = await channel.fetch_message(message_id)
             await message.edit(embed=await self.build_panel_embed(guild_id), view=MusicPanelView(self))
+        except discord.NotFound:
+            logger.warning("Music panel message is gone, clearing saved panel: guild=%s message=%s", guild_id, message_id)
+            await self.clear_saved_panel(guild_id)
         except discord.HTTPException:
             logger.exception("Failed to update music panel")
 
