@@ -227,6 +227,8 @@ class MusicPanelView(discord.ui.View):
 
 
 class MusicCog(commands.Cog):
+    music_group = app_commands.Group(name="music", description="Управление музыкальным пультом")
+
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self.queues: dict[int, list[Track]] = {}
@@ -337,12 +339,15 @@ class MusicCog(commands.Cog):
         ephemeral: bool = True,
     ) -> None:
         kwargs: dict[str, Any] = {
-            "content": content,
-            "embed": embed,
-            "view": view,
             "ephemeral": ephemeral,
             "allowed_mentions": discord.AllowedMentions.none(),
         }
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if view is not None:
+            kwargs["view"] = view
         if interaction.response.is_done():
             await interaction.followup.send(**kwargs)
         else:
@@ -790,28 +795,23 @@ class MusicCog(commands.Cog):
     async def play(self, interaction: discord.Interaction, query: str) -> None:
         await self.handle_query_interaction(interaction, query)
 
-    @app_commands.command(name="skip", description="Пропустить текущий трек")
-    @app_commands.guild_only()
+    @music_group.command(name="skip", description="Пропустить текущий трек")
     async def skip_command(self, interaction: discord.Interaction) -> None:
         await self.skip_action(interaction)
 
-    @app_commands.command(name="stop", description="Остановить музыку и очистить очередь")
-    @app_commands.guild_only()
+    @music_group.command(name="stop", description="Остановить музыку и очистить очередь")
     async def stop_command(self, interaction: discord.Interaction) -> None:
         await self.stop_action(interaction)
 
-    @app_commands.command(name="leave", description="Отключить бота от голосового канала")
-    @app_commands.guild_only()
+    @music_group.command(name="leave", description="Отключить бота от голосового канала")
     async def leave_command(self, interaction: discord.Interaction) -> None:
         await self.leave_action(interaction)
 
-    @app_commands.command(name="queue", description="Показать музыкальную очередь")
-    @app_commands.guild_only()
+    @music_group.command(name="queue", description="Показать музыкальную очередь")
     async def queue_command(self, interaction: discord.Interaction) -> None:
         await self.queue_action(interaction)
 
-    @app_commands.command(name="nowplaying", description="Показать текущий трек")
-    @app_commands.guild_only()
+    @music_group.command(name="nowplaying", description="Показать текущий трек")
     async def nowplaying(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
@@ -822,9 +822,8 @@ class MusicCog(commands.Cog):
             return
         await interaction.response.send_message(embed=self.simple_embed("▶️ Сейчас играет", f"**{track.title}**", track))
 
-    @app_commands.command(name="volume", description="Поставить громкость музыки")
+    @music_group.command(name="volume", description="Поставить громкость музыки")
     @app_commands.describe(value="Громкость 0-100")
-    @app_commands.guild_only()
     async def volume_command(self, interaction: discord.Interaction, value: int) -> None:
         await self.handle_volume_submit(interaction, str(value))
 
