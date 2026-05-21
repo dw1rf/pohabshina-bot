@@ -93,7 +93,7 @@ class WelcomeCog(commands.Cog):
     def build_welcome_embed(self, member: discord.Member, thumbnail_url: str | None = None) -> discord.Embed:
         embed = discord.Embed(
             title="👋 Новый участник!",
-            description=f"Добро пожаловать, {member.mention}",
+            description=f"Добро пожаловать, {member.mention} https://discord.com/channels/1491894210050265180/1496281104439709819 https://discord.com/channels/1491894210050265180/1496777131374542888",
             color=WELCOME_COLOR,
         )
         thumb = (thumbnail_url or DEFAULT_THUMBNAIL_URL or "").strip()
