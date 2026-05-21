@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import discord
 from discord import app_commands
@@ -23,6 +26,11 @@ try:
     import imageio_ffmpeg
 except ImportError:  # pragma: no cover - optional ffmpeg binary fallback.
     imageio_ffmpeg = None
+
+try:
+    import static_ffmpeg
+except ImportError:  # pragma: no cover - optional ffmpeg binary fallback.
+    static_ffmpeg = None
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +102,15 @@ def _is_safe_url(query: str) -> bool:
     if lowered.startswith(("file://", "ftp://")):
         return False
     return "../" not in lowered and "..\\" not in lowered
+
+
+def _is_rejected_music_url(query: str) -> bool:
+    parsed = urlparse(query.strip())
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    return host in {"discord.com", "www.discord.com", "discordapp.com", "www.discordapp.com"} and path.startswith(
+        "/oauth2/"
+    )
 
 
 def _can_manage_music(user: discord.Member | discord.User) -> bool:
@@ -239,6 +256,8 @@ class MusicCog(commands.Cog):
         self.now_playing: dict[int, Track] = {}
         self.settings: dict[int, MusicGuildSettings] = {}
         self.panel_messages: dict[int, tuple[int, int]] = {}
+        self._ffmpeg_executable: str | None = None
+        self._ffmpeg_logged = False
         self.bot.add_view(MusicPanelView(self))
 
     async def init_db(self) -> None:
@@ -324,7 +343,7 @@ class MusicCog(commands.Cog):
 
     def voice_dependency_error(self) -> str | None:
         if self.ffmpeg_executable() is None:
-            return "FFmpeg не найден. Без него я немой кусок железа. Нужен Docker image/egg с ffmpeg или пакет imageio-ffmpeg."
+            return "FFmpeg не найден. Без него я немой кусок железа. Нужен Docker image/egg с ffmpeg или пакеты static-ffmpeg/imageio-ffmpeg."
         try:
             import nacl  # noqa: F401
         except ImportError:
@@ -334,16 +353,51 @@ class MusicCog(commands.Cog):
         return None
 
     def ffmpeg_executable(self) -> str | None:
+        if self._ffmpeg_executable:
+            return self._ffmpeg_executable
+
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
-            return system_ffmpeg
+            self._ffmpeg_executable = system_ffmpeg
+            return self._ffmpeg_executable
+
+        if static_ffmpeg is not None:
+            try:
+                download_dir = os.path.join(os.getenv("DATA_DIR", "/app/data"), "ffmpeg")
+                os.makedirs(download_dir, exist_ok=True)
+                static_ffmpeg.add_paths(weak=False, download_dir=download_dir)
+                static_path = shutil.which("ffmpeg")
+                if static_path:
+                    self._ffmpeg_executable = static_path
+                    return self._ffmpeg_executable
+            except Exception:
+                logger.exception("static-ffmpeg did not provide an ffmpeg executable")
+
         if imageio_ffmpeg is None:
             return None
         try:
-            return imageio_ffmpeg.get_ffmpeg_exe()
+            self._ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
+            return self._ffmpeg_executable
         except Exception:
             logger.exception("imageio-ffmpeg did not provide an ffmpeg executable")
             return None
+
+    def log_ffmpeg_details(self, ffmpeg_executable: str) -> None:
+        if self._ffmpeg_logged:
+            return
+        self._ffmpeg_logged = True
+        try:
+            completed = subprocess.run(
+                [ffmpeg_executable, "-version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            first_line = (completed.stdout or completed.stderr or "").splitlines()[0:1]
+            logger.info("Using FFmpeg executable: path=%s version=%s", ffmpeg_executable, first_line[0] if first_line else "unknown")
+        except Exception:
+            logger.exception("Failed to inspect FFmpeg executable: path=%s", ffmpeg_executable)
 
     def ffmpeg_audio_options(self, volume: float) -> str:
         safe_volume = max(0.0, min(1.5, volume))
@@ -478,6 +532,9 @@ class MusicCog(commands.Cog):
         if _is_http_url(clean_query) and not _is_safe_url(clean_query):
             await self.send_interaction_message(interaction, "Ссылка тухлая или небезопасная. Жру только http/https без странных трюков.", ephemeral=True)
             return
+        if _is_http_url(clean_query) and _is_rejected_music_url(clean_query):
+            await self.send_interaction_message(interaction, "Это не музыкальная ссылка. Дай YouTube/SoundCloud или нормальный поисковый запрос.", ephemeral=True)
+            return
         if not _is_http_url(clean_query) and ("://" in clean_query or "../" in clean_query or "..\\" in clean_query):
             await self.send_interaction_message(interaction, "Такой путь я не ем. Дай нормальный URL или название трека.", ephemeral=True)
             return
@@ -553,6 +610,7 @@ class MusicCog(commands.Cog):
                 logger.error("Cannot start track: ffmpeg executable is unavailable")
                 self.now_playing.pop(guild_id, None)
                 return False
+            self.log_ffmpeg_details(ffmpeg_executable)
             source = discord.FFmpegOpusAudio(
                 track.stream_url,
                 executable=ffmpeg_executable,
