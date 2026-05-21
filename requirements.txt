@@ -6,5 +6,3 @@ mcstatus>=11.1.1
 Pillow>=10.0.0
 PyNaCl>=1.5.0
 yt-dlp>=2025.0.0
-static-ffmpeg>=2.13
-imageio-ffmpeg>=0.5.1

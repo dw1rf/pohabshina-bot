@@ -27,11 +27,6 @@ try:
 except ImportError:  # pragma: no cover - optional ffmpeg binary fallback.
     imageio_ffmpeg = None
 
-try:
-    import static_ffmpeg
-except ImportError:  # pragma: no cover - optional ffmpeg binary fallback.
-    static_ffmpeg = None
-
 logger = logging.getLogger(__name__)
 
 YTDL_OPTIONS: dict[str, Any] = {
@@ -44,6 +39,12 @@ YTDL_OPTIONS: dict[str, Any] = {
 }
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 URL_PREFIXES = ("http://", "https://")
+ALLOW_IMAGEIO_FFMPEG_FALLBACK = os.getenv("MUSIC_ALLOW_IMAGEIO_FFMPEG_FALLBACK", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 @dataclass(slots=True)
@@ -259,6 +260,12 @@ class MusicCog(commands.Cog):
         self._ffmpeg_executable: str | None = None
         self._ffmpeg_logged = False
         self.bot.add_view(MusicPanelView(self))
+        ffmpeg_path = self.ffmpeg_executable()
+        if ffmpeg_path:
+            logger.info("Music cog found FFmpeg: %s", ffmpeg_path)
+            self.log_ffmpeg_details(ffmpeg_path)
+        else:
+            logger.error("FFmpeg не установлен в контейнере. Music cog loaded, but playback commands will return an error.")
 
     async def init_db(self) -> None:
         if self.bot.db is None:
@@ -359,7 +366,7 @@ class MusicCog(commands.Cog):
 
     def voice_dependency_error(self) -> str | None:
         if self.ffmpeg_executable() is None:
-            return "FFmpeg не найден. Без него я немой кусок железа. Нужен Docker image/egg с ffmpeg или пакеты static-ffmpeg/imageio-ffmpeg."
+            return "FFmpeg не установлен в контейнере. Поставь системный ffmpeg в Docker image/egg."
         try:
             import nacl  # noqa: F401
         except ImportError:
@@ -377,26 +384,24 @@ class MusicCog(commands.Cog):
             self._ffmpeg_executable = system_ffmpeg
             return self._ffmpeg_executable
 
-        if static_ffmpeg is not None:
-            try:
-                download_dir = os.path.join(os.getenv("DATA_DIR", "/app/data"), "ffmpeg")
-                os.makedirs(download_dir, exist_ok=True)
-                static_ffmpeg.add_paths(weak=False, download_dir=download_dir)
-                static_path = shutil.which("ffmpeg")
-                if static_path:
-                    self._ffmpeg_executable = static_path
-                    return self._ffmpeg_executable
-            except Exception:
-                logger.exception("static-ffmpeg did not provide an ffmpeg executable")
+        if not ALLOW_IMAGEIO_FFMPEG_FALLBACK:
+            logger.error("FFmpeg не установлен в контейнере: shutil.which('ffmpeg') returned nothing")
+            return None
 
         if imageio_ffmpeg is None:
+            logger.error("FFmpeg не установлен в контейнере, and imageio-ffmpeg fallback is unavailable")
             return None
+
         try:
-            self._ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
-            return self._ffmpeg_executable
+            fallback_path = imageio_ffmpeg.get_ffmpeg_exe()
+            if fallback_path and os.path.exists(fallback_path):
+                logger.warning("Using imageio-ffmpeg fallback executable: %s", fallback_path)
+                self._ffmpeg_executable = fallback_path
+                return self._ffmpeg_executable
+            logger.error("imageio-ffmpeg returned a missing executable: %s", fallback_path)
         except Exception:
             logger.exception("imageio-ffmpeg did not provide an ffmpeg executable")
-            return None
+        return None
 
     def log_ffmpeg_details(self, ffmpeg_executable: str) -> None:
         if self._ffmpeg_logged:
