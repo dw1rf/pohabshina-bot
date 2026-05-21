@@ -20,6 +20,7 @@ from services.reaction_role_service import ReactionRoleService
 from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
 from services.social_game_service import SocialGameService
+from utils.command_localizations import RussianCommandNameTranslator
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ class MovieBot(commands.Bot):
         loaded_cogs = await self.load_cogs()
 
         self.tree.on_error = self.on_tree_error
+        await self.tree.set_translator(RussianCommandNameTranslator())
         await self.tree.sync()
         self._extensions_bootstrapped = True
         logger.info("Bot started, genres loaded: %s, cogs loaded: %s", len(self.watchmode.genre_id_to_name), loaded_cogs)
