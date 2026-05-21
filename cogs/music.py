@@ -19,6 +19,11 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime for clearer Discord errors.
     yt_dlp = None
 
+try:
+    import imageio_ffmpeg
+except ImportError:  # pragma: no cover - optional ffmpeg binary fallback.
+    imageio_ffmpeg = None
+
 logger = logging.getLogger(__name__)
 
 YTDL_OPTIONS: dict[str, Any] = {
@@ -319,8 +324,8 @@ class MusicCog(commands.Cog):
         await self.bot.db.commit()
 
     def voice_dependency_error(self) -> str | None:
-        if shutil.which("ffmpeg") is None:
-            return "FFmpeg не найден. Без него я немой кусок железа. Нужен Docker image/egg с ffmpeg."
+        if self.ffmpeg_executable() is None:
+            return "FFmpeg не найден. Без него я немой кусок железа. Нужен Docker image/egg с ffmpeg или пакет imageio-ffmpeg."
         try:
             import nacl  # noqa: F401
         except ImportError:
@@ -328,6 +333,18 @@ class MusicCog(commands.Cog):
         if yt_dlp is None:
             return "yt-dlp не установлен. Без него я не достану аудио из музыкальной помойки."
         return None
+
+    def ffmpeg_executable(self) -> str | None:
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg:
+            return system_ffmpeg
+        if imageio_ffmpeg is None:
+            return None
+        try:
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            logger.exception("imageio-ffmpeg did not provide an ffmpeg executable")
+            return None
 
     async def send_interaction_message(
         self,
@@ -525,8 +542,14 @@ class MusicCog(commands.Cog):
         self.now_playing[guild_id] = track
 
         try:
+            ffmpeg_executable = self.ffmpeg_executable()
+            if ffmpeg_executable is None:
+                logger.error("Cannot start track: ffmpeg executable is unavailable")
+                self.now_playing.pop(guild_id, None)
+                return
             source = discord.FFmpegPCMAudio(
                 track.stream_url,
+                executable=ffmpeg_executable,
                 before_options=FFMPEG_BEFORE_OPTIONS,
                 options=FFMPEG_OPTIONS,
             )

@@ -26,13 +26,20 @@ CONTROL_PHRASE_RE = re.compile(
 )
 POLICY_META_RE = re.compile(
     r"(?is)\b(?:"
-    r"the user (?:says|asks|asked|is asking)|"
+    r"(?:the\s+)?user (?:wants|says|asks|asked|is asking|requested|requests)|"
     r"which is (?:sexual|explicit)|"
     r"we (?:cannot|can't|must|should not|need to) (?:provide|assist|help|refuse)|"
     r"i (?:cannot|can't|won't) (?:provide|assist|help)|"
-    r"must refuse|"
+    r"must refuse|allowed|disallowed|not allowed|"
     r"sexual content|explicit sexual|against (?:the )?policy|not appropriate"
     r")\b"
+)
+LEAKED_DECISION_PREFIX_RE = re.compile(
+    r"(?is)^\s*(?:"
+    r"(?:the\s+)?user\s+(?:wants|says|asks|asked|is asking|requested|requests)\b.*?\b"
+    r"(?:allowed|disallowed|not allowed|must refuse|cannot|can't)\s*\.?\s*"
+    r"|(?:allowed|disallowed|not allowed|must refuse)\s*\.?\s*"
+    r")+"
 )
 
 INVITE_RE = re.compile(r"(?i)\b(?:https?://)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com/invite)/[a-z0-9-]+")
@@ -178,6 +185,7 @@ class AIPersonaService:
         cleaned = META_TO_ANSWER_RE.sub("", cleaned).strip()
         cleaned = META_SENTENCE_RE.sub("", cleaned).strip()
         cleaned = CONTROL_PHRASE_RE.sub("", cleaned).strip()
+        cleaned = LEAKED_DECISION_PREFIX_RE.sub("", cleaned).strip()
         cleaned = cleaned.replace("@everyone", "everyone").replace("@here", "here")
         cleaned = MENTION_RE.sub("[упоминание]", cleaned)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
