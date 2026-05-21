@@ -558,7 +558,6 @@ class MusicCog(commands.Cog):
                 executable=ffmpeg_executable,
                 before_options=FFMPEG_BEFORE_OPTIONS,
                 options=self.ffmpeg_audio_options(settings.volume),
-                codec="libopus",
             )
         except Exception:
             logger.exception("FFmpeg source creation failed")
