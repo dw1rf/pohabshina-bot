@@ -117,6 +117,150 @@ SHOP_REQUESTS_TO_SUPPORT=true
 
 ---
 
+## AI-NPC сервера
+
+AI-модуль живёт в `cogs/ai_chat.py` и использует персонажный сервис `services/ai_persona_service.py`. Он работает только в каналах, включённых через `/ai channel_enable`, и не должен отвечать на каждое сообщение: ответы ограничены cooldown, дневным лимитом и шансом случайной реплики.
+
+Старые команды сохранены:
+
+- `/ai ask` - публичный вопрос AI.
+- `/ai private` - приватный вопрос AI.
+- `/ai channel_enable` - включить AI в текущем канале.
+- `/ai channel_disable` - выключить AI в текущем канале.
+
+Новые команды:
+
+- `/ai history` - поиск по сохранённой AI-памяти.
+- `/ai creepy` - отправить случайную локальную картинку из `assets/creepy`.
+- `/ai image_describe` - описать прикреплённую картинку, если включён vision-режим.
+- `/ai afisha` - сделать preview афиши и опубликовать только после подтверждения админа.
+- `/ai_relation set/show/reset` - вручную управлять отношением AI к пользователям.
+- `/ai_config status` - показать provider, persona, лимиты, usage, память, реакции и mood.
+- `/ai_config mood_set` - вручную поставить mood сервера.
+- `/ai_config memory_clear_user` - очистить память по пользователю.
+- `/ai_config memory_clear_channel` - очистить память текущего канала.
+- `/ai_config random_replies` - включить или выключить случайные реплики.
+- `/ai_config reactions` - включить или выключить реакции.
+
+AI не является модератором: он не должен самовольно мутить, банить, кикать или обещать реальные наказания. Ответы проходят sanitization: удаляются `<think>...</think>`, meta-фразы модели, прямые mentions и реальные угрозы. Запрещённые угрозы заменяются безопасной театральной фразой.
+
+### AI `.env`
+
+```env
+AI_PROVIDER=gemini
+AI_PERSONA=pohab_npc
+AI_RANDOM_REPLY_CHANCE=0.04
+AI_GLOBAL_COOLDOWN_SECONDS=60
+AI_USER_COOLDOWN_SECONDS=120
+AI_DAILY_LIMIT=700
+AI_CONTEXT_LIMIT_CHARS=1500
+AI_MEMORY_DAYS=30
+AI_BOT_ALIASES=мурка,бот,пахабщина,пахаб
+AI_ENABLE_MEMORY=true
+AI_ENABLE_RANDOM_REPLIES=true
+AI_ENABLE_REACTIONS=true
+AI_ENABLE_IMAGE_DESCRIBE=false
+AI_ALLOW_SUPPORT_TICKETS=false
+AI_MAX_PROMPT_LENGTH=1800
+AI_MAX_OUTPUT_TOKENS=500
+AI_TEMPERATURE=0.75
+
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.5-flash
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=gemma3
+```
+
+### Что делают AI env
+
+| Переменная | По умолчанию | Что делает |
+| --- | --- | --- |
+| `AI_PROVIDER` | `gemini` | Выбирает backend генерации: `gemini`, `groq` или `ollama`. |
+| `AI_PERSONA` | `pohab_npc` | Имя режима персонажа для статуса и конфигурации. Логика prompt сейчас живёт в `AIPersonaService`. |
+| `AI_RANDOM_REPLY_CHANCE` | `0.04` | Вероятность редкой самостоятельной реплики на обычное сообщение в AI-канале. `0.04` = примерно 4%, но cooldown всё равно ограничивает ответы. |
+| `AI_GLOBAL_COOLDOWN_SECONDS` | `60` | Минимальная пауза между AI-ответами на всём сервере. Главная защита от сжигания Groq Free. |
+| `AI_USER_COOLDOWN_SECONDS` | `120` | Минимальная пауза между AI-ответами одному пользователю. |
+| `AI_DAILY_LIMIT` | `700` | Максимум AI-запросов в сутки на сервер. Хранится в SQLite в `ai_usage_daily`. |
+| `AI_CONTEXT_LIMIT_CHARS` | `1500` | Максимальный размер локального контекста, который добавляется к prompt: память канала, память пользователя, relation и mood. |
+| `AI_MEMORY_DAYS` | `30` | Сколько дней хранить AI-память сообщений. Старые записи чистятся при запуске AI cog. |
+| `AI_BOT_ALIASES` | `мурка,бот,пахабщина,пахаб` | Слова, на которые бот реагирует как на обращение к себе без прямого Discord mention. Разделитель - запятая. |
+| `AI_ENABLE_MEMORY` | `true` | Включает сохранение очищенных сообщений в AI-enabled каналах. Не сохраняет ботов, команды, слишком короткий текст, invite/email/телефоны/tokens в открытом виде. |
+| `AI_ENABLE_RANDOM_REPLIES` | `true` | Глобальный env-дефолт для редких случайных ответов. На сервере можно переопределить через `/ai_config random_replies`. |
+| `AI_ENABLE_REACTIONS` | `true` | Глобальный env-дефолт для локальных реакций без AI-запроса. На сервере можно переопределить через `/ai_config reactions`. |
+| `AI_ENABLE_IMAGE_DESCRIBE` | `false` | Включает `/ai image_describe`. По умолчанию выключено, потому что vision-запросы дороже и требуют Groq ключ. |
+| `AI_ALLOW_SUPPORT_TICKETS` | `false` | Разрешает AI отвечать в support/ticket каналах. По умолчанию выключено, чтобы AI не мешал поддержке. |
+| `AI_MAX_PROMPT_LENGTH` | `1800` | Максимальная длина пользовательского prompt для slash-команд и автоответов. |
+| `AI_MAX_OUTPUT_TOKENS` | `500` | Лимит генерации ответа у AI provider. |
+| `AI_TEMPERATURE` | `0.75` | Температура генерации. Выше = более хаотичный стиль, ниже = суше и стабильнее. |
+| `GEMINI_API_KEY` | пусто | Ключ Gemini, если `AI_PROVIDER=gemini`. |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Модель Gemini. |
+| `GROQ_API_KEY` | пусто | Ключ Groq, если `AI_PROVIDER=groq` или используется `/ai image_describe`. |
+| `GROQ_MODEL` | `openai/gpt-oss-20b` | Текстовая модель Groq. |
+| `GROQ_VISION_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` | Vision-модель Groq для `/ai image_describe`. |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | URL локального Ollama API, если `AI_PROVIDER=ollama`. |
+| `OLLAMA_MODEL` | `gemma3` | Локальная модель Ollama. |
+
+### Рекомендации для Groq Free
+
+Для бесплатного Groq лучше начинать с консервативных значений:
+
+```env
+AI_RANDOM_REPLY_CHANCE=0.02
+AI_GLOBAL_COOLDOWN_SECONDS=90
+AI_USER_COOLDOWN_SECONDS=180
+AI_DAILY_LIMIT=300
+AI_MAX_OUTPUT_TOKENS=350
+```
+
+Если бот слишком молчаливый, сначала поднимайте `AI_RANDOM_REPLY_CHANCE` до `0.04-0.05`, а не уменьшайте cooldown. Если бот упирается в 429, увеличивайте `AI_GLOBAL_COOLDOWN_SECONDS` и снижайте `AI_DAILY_LIMIT`.
+
+### AI-память и приватность
+
+Память сохраняется только в каналах, где включён AI. Перед записью текст чистится:
+
+- Discord invite links заменяются на `[invite]`;
+- email заменяются на `[email]`;
+- телефоны заменяются на `[phone]`;
+- длинные числа заменяются на `[number]`;
+- token-like строки заменяются на `[token]`;
+- markdown и лишние пробелы удаляются;
+- запись обрезается до 500 символов.
+
+Таблицы создаются автоматически:
+
+- `ai_message_memory` - очищенная память сообщений;
+- `ai_user_relations` - relation, affection, irritation, nickname;
+- `ai_guild_mood` - mood, chaos, irritation;
+- `ai_usage_daily` - дневной счётчик AI-запросов;
+- `ai_guild_settings` - серверные overrides для random replies и reactions.
+
+### Отношения и mood
+
+Relation может быть:
+
+- `favorite` - бот мягче и теплее подкалывает пользователя;
+- `neutral` - обычный режим;
+- `rival` - более колючий и язвительный стиль;
+- `ignored` - почти всегда молчит;
+- `cursed` - мрачный и криповый стиль.
+
+Mood сервера может быть:
+
+- `neutral`;
+- `playful`;
+- `annoyed`;
+- `creepy`;
+- `sleepy`;
+- `friday_chaos`;
+- `horny_chaos`.
+
+Mood считается локально без AI-запроса: вопросы, смех, капс, мат, грустные и хаотичные сообщения меняют состояние сервера. Ночью mood может уходить в `sleepy`/`creepy`, в пятницу - в `friday_chaos`.
+
+---
+
 ## Примечания
 
 - Бот использует SQLite и автоматически создаёт нужные таблицы при запуске.
