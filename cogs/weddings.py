@@ -1070,11 +1070,9 @@ class WeddingsCog(commands.Cog):
         view = RelationshipMenuView(self, interaction.user.id, interaction.guild.id, int(marriage["id"]))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-    @wedding_group.command(name="top_relationships", description="Топ пар по развитию отношений")
     async def relationship_top(self, interaction: discord.Interaction) -> None:
         await self.send_relationship_top(interaction)
 
-    @wedding_group.command(name="top", description="Топ пар по длительности брака")
     async def top_couples(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Эта команда доступна только на сервере.", ephemeral=True)

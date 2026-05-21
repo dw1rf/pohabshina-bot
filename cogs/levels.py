@@ -65,7 +65,6 @@ class LevelsCog(commands.Cog):
         embed.set_thumbnail(url=target.display_avatar.url)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="top", description="Показать топ по уровням")
     async def top(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         if guild is None or not self.bot.db:
