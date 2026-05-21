@@ -35,7 +35,6 @@ YTDL_OPTIONS: dict[str, Any] = {
     "source_address": "0.0.0.0",
 }
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTIONS = "-vn"
 URL_PREFIXES = ("http://", "https://")
 
 
@@ -346,6 +345,10 @@ class MusicCog(commands.Cog):
             logger.exception("imageio-ffmpeg did not provide an ffmpeg executable")
             return None
 
+    def ffmpeg_audio_options(self, volume: float) -> str:
+        safe_volume = max(0.0, min(1.5, volume))
+        return f"-vn -filter:a volume={safe_volume:.2f}"
+
     async def send_interaction_message(
         self,
         interaction: discord.Interaction,
@@ -525,18 +528,21 @@ class MusicCog(commands.Cog):
             )
             return
 
-        await self.start_track(interaction.guild.id, voice_client, track)
+        started = await self.start_track(interaction.guild.id, voice_client, track)
+        if not started:
+            await self.send_interaction_message(interaction, "FFmpeg подавился этим треком.", ephemeral=True)
+            return
         await self.send_interaction_message(
             interaction,
             embed=self.simple_embed("▶️ Играю", f"**{track.title}**", track),
             ephemeral=False,
         )
 
-    async def start_track(self, guild_id: int, voice_client: discord.VoiceClient, track: Track) -> None:
+    async def start_track(self, guild_id: int, voice_client: discord.VoiceClient, track: Track) -> bool:
         dependency_error = self.voice_dependency_error()
         if dependency_error:
             logger.error("Cannot start track: %s", dependency_error)
-            return
+            return False
         settings = await self.get_settings(guild_id)
         settings.stopped = False
         self.now_playing[guild_id] = track
@@ -546,18 +552,18 @@ class MusicCog(commands.Cog):
             if ffmpeg_executable is None:
                 logger.error("Cannot start track: ffmpeg executable is unavailable")
                 self.now_playing.pop(guild_id, None)
-                return
-            source = discord.FFmpegPCMAudio(
+                return False
+            source = discord.FFmpegOpusAudio(
                 track.stream_url,
                 executable=ffmpeg_executable,
                 before_options=FFMPEG_BEFORE_OPTIONS,
-                options=FFMPEG_OPTIONS,
+                options=self.ffmpeg_audio_options(settings.volume),
+                codec="libopus",
             )
-            volume_source = discord.PCMVolumeTransformer(source, volume=settings.volume)
         except Exception:
             logger.exception("FFmpeg source creation failed")
             self.now_playing.pop(guild_id, None)
-            return
+            return False
 
         def after_play(error: Exception | None) -> None:
             if error:
@@ -566,12 +572,13 @@ class MusicCog(commands.Cog):
 
         logger.info("Starting track: guild=%s title=%s", guild_id, track.title)
         try:
-            voice_client.play(volume_source, after=after_play)
+            voice_client.play(source, after=after_play)
         except Exception:
             logger.exception("FFmpeg playback failed")
             self.now_playing.pop(guild_id, None)
-            return
+            return False
         await self.update_panel(guild_id)
+        return True
 
     async def play_next(self, guild_id: int) -> None:
         settings = await self.get_settings(guild_id)
@@ -763,11 +770,14 @@ class MusicCog(commands.Cog):
         settings = await self.get_settings(interaction.guild.id)
         settings.volume = value / 100
         voice_client = interaction.guild.voice_client
+        live_change = False
         if isinstance(voice_client, discord.VoiceClient) and isinstance(voice_client.source, discord.PCMVolumeTransformer):
             voice_client.source.volume = settings.volume
+            live_change = True
         await self.save_settings(interaction.guild.id)
         await self.update_panel(interaction.guild.id)
-        await self.send_interaction_message(interaction, f"🔊 Громкость поставил на {value}%. Уши берегите сами.", ephemeral=True)
+        suffix = "" if live_change else " Применится со следующего трека."
+        await self.send_interaction_message(interaction, f"🔊 Громкость поставил на {value}%. Уши берегите сами.{suffix}", ephemeral=True)
 
     async def loop_action(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None:
@@ -795,7 +805,7 @@ class MusicCog(commands.Cog):
         text = "🔀 Shuffle включён. Очередь пошла по кривой дорожке." if settings.shuffle else "🔀 Shuffle выключен."
         await self.send_interaction_message(interaction, text, ephemeral=True)
 
-    @app_commands.command(name="music_panel", description="Отправить музыкальный пульт Пахабщины")
+    @music_group.command(name="panel", description="Отправить музыкальный пульт Пахабщины")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.guild_only()
     async def music_panel(self, interaction: discord.Interaction) -> None:
@@ -812,7 +822,7 @@ class MusicCog(commands.Cog):
         self.panel_messages[interaction.guild.id] = (message.channel.id, message.id)
         await self.save_settings(interaction.guild.id)
 
-    @app_commands.command(name="play", description="Включить музыку по URL или поисковому запросу")
+    @music_group.command(name="play", description="Включить музыку по URL или поисковому запросу")
     @app_commands.describe(query="URL или название песни")
     @app_commands.guild_only()
     async def play(self, interaction: discord.Interaction, query: str) -> None:
