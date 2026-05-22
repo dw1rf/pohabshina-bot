@@ -39,7 +39,7 @@ YTDL_OPTIONS: dict[str, Any] = {
 }
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 URL_PREFIXES = ("http://", "https://")
-ALLOW_IMAGEIO_FFMPEG_FALLBACK = os.getenv("MUSIC_ALLOW_IMAGEIO_FFMPEG_FALLBACK", "false").lower() in {
+ALLOW_IMAGEIO_FFMPEG_FALLBACK = os.getenv("MUSIC_ALLOW_IMAGEIO_FFMPEG_FALLBACK", "true").lower() in {
     "1",
     "true",
     "yes",
