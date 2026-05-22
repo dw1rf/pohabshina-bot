@@ -424,8 +424,9 @@ class MusicCog(commands.Cog):
         except Exception:
             logger.exception("Failed to inspect FFmpeg executable: path=%s", ffmpeg_executable)
 
-    def ffmpeg_audio_options(self) -> str:
-        return "-vn"
+    def ffmpeg_audio_options(self, volume: float) -> str:
+        safe_volume = max(0.0, min(1.5, volume))
+        return f"-vn -filter:a volume={safe_volume:.2f}"
 
     async def send_interaction_message(
         self,
@@ -636,13 +637,14 @@ class MusicCog(commands.Cog):
                 return False
             logger.info("Preparing FFmpeg audio source: guild=%s ffmpeg=%s", guild_id, ffmpeg_executable)
             self.log_ffmpeg_details(ffmpeg_executable)
-            audio = discord.FFmpegPCMAudio(
+            source = discord.FFmpegOpusAudio(
                 track.stream_url,
+                bitrate=128,
+                codec="libopus",
                 executable=ffmpeg_executable,
                 before_options=FFMPEG_BEFORE_OPTIONS,
-                options=self.ffmpeg_audio_options(),
+                options=self.ffmpeg_audio_options(settings.volume),
             )
-            source = discord.PCMVolumeTransformer(audio, volume=max(0.0, min(1.5, settings.volume)))
         except Exception:
             logger.exception("FFmpeg source creation failed")
             self.now_playing.pop(guild_id, None)
