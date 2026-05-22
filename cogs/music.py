@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 import shutil
 import subprocess
@@ -22,11 +21,6 @@ try:
 except ImportError:  # pragma: no cover - handled at runtime for clearer Discord errors.
     yt_dlp = None
 
-try:
-    import imageio_ffmpeg
-except ImportError:  # pragma: no cover - optional ffmpeg binary fallback.
-    imageio_ffmpeg = None
-
 logger = logging.getLogger(__name__)
 
 YTDL_OPTIONS: dict[str, Any] = {
@@ -36,15 +30,10 @@ YTDL_OPTIONS: dict[str, Any] = {
     "default_search": "ytsearch",
     "extract_flat": False,
     "source_address": "0.0.0.0",
+    "js_runtimes": {"deno": {}},
 }
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 URL_PREFIXES = ("http://", "https://")
-ALLOW_IMAGEIO_FFMPEG_FALLBACK = os.getenv("MUSIC_ALLOW_IMAGEIO_FFMPEG_FALLBACK", "true").lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 
 
 @dataclass(slots=True)
@@ -381,32 +370,26 @@ class MusicCog(commands.Cog):
 
         system_ffmpeg = shutil.which("ffmpeg")
         if system_ffmpeg:
+            if "imageio_ffmpeg" in system_ffmpeg.replace("\\", "/"):
+                logger.warning(
+                    "FFmpeg path points to imageio-ffmpeg fallback; production should use system FFmpeg: %s",
+                    system_ffmpeg,
+                )
             self._ffmpeg_executable = system_ffmpeg
             return self._ffmpeg_executable
 
-        if not ALLOW_IMAGEIO_FFMPEG_FALLBACK:
-            logger.error("FFmpeg не установлен в контейнере: shutil.which('ffmpeg') returned nothing")
-            return None
-
-        if imageio_ffmpeg is None:
-            logger.error("FFmpeg не установлен в контейнере, and imageio-ffmpeg fallback is unavailable")
-            return None
-
-        try:
-            fallback_path = imageio_ffmpeg.get_ffmpeg_exe()
-            if fallback_path and os.path.exists(fallback_path):
-                logger.warning("Using imageio-ffmpeg fallback executable: %s", fallback_path)
-                self._ffmpeg_executable = fallback_path
-                return self._ffmpeg_executable
-            logger.error("imageio-ffmpeg returned a missing executable: %s", fallback_path)
-        except Exception:
-            logger.exception("imageio-ffmpeg did not provide an ffmpeg executable")
+        logger.error("FFmpeg не установлен в контейнере: shutil.which('ffmpeg') returned nothing")
         return None
 
     def log_ffmpeg_details(self, ffmpeg_executable: str) -> None:
         if self._ffmpeg_logged:
             return
         self._ffmpeg_logged = True
+        if "imageio_ffmpeg" in ffmpeg_executable.replace("\\", "/"):
+            logger.warning(
+                "FFmpeg path points to imageio-ffmpeg fallback; production should use system FFmpeg: %s",
+                ffmpeg_executable,
+            )
         try:
             completed = subprocess.run(
                 [ffmpeg_executable, "-version"],
