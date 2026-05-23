@@ -46,6 +46,8 @@ python bot.py
 
 Dockerfile сделан по схеме из инструкций хостинга: `python:3.12-slim-bookworm` + `apt-get install ffmpeg` внутри image. Если проект запущен как обычный Python egg, этот Dockerfile не используется, поэтому `ffmpeg` внутри контейнера не появится.
 
+Для Bothost `agentv3` в `requirements.txt` также добавлен `ffmpeg-python`: проект не использует его API напрямую, но генератор Bothost по этой зависимости автоматически добавляет системный apt-пакет `ffmpeg` в сгенерированный Dockerfile.
+
 Если в логах остаётся ошибка `shutil.which('ffmpeg') returned nothing`, значит хостинг запустил не этот Dockerfile или контейнер не был пересобран. Пересоберите image с нуля и проверьте внутри контейнера:
 
 ```bash
