@@ -34,6 +34,27 @@ python bot.py
 
 ---
 
+## Docker / BotHost
+
+Музыкальный модуль и TTS используют системные бинарники, а не Python-пакеты:
+
+- `ffmpeg` нужен для `discord.FFmpegPCMAudio`;
+- `deno` нужен `yt-dlp` для стабильной работы с YouTube;
+- `libopus0` нужен голосовому стеку Discord.
+
+Эти зависимости нельзя поставить через `requirements.txt`. На BotHost нужно запускать проект как Docker image/custom Dockerfile. Текущий `Dockerfile` уже устанавливает `ffmpeg`, `deno` и `libopus0`, а при сборке проверяет, что команды `ffmpeg` и `deno` доступны в `PATH`.
+
+Если в логах остаётся ошибка `shutil.which('ffmpeg') returned nothing`, значит хостинг запустил не этот Dockerfile или контейнер не был пересобран. Пересоберите image с нуля и проверьте внутри контейнера:
+
+```bash
+which ffmpeg
+ffmpeg -version
+which deno
+deno --version
+```
+
+---
+
 ## Переменные `.env`
 
 ### Обязательные
