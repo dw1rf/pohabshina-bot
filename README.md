@@ -44,7 +44,15 @@ python bot.py
 
 Эти зависимости нельзя поставить через `requirements.txt`. На BotHost нужно запускать проект как Docker image/custom Dockerfile. Текущий `Dockerfile` уже устанавливает `ffmpeg`, `deno` и `libopus0`, а при сборке проверяет, что команды `ffmpeg` и `deno` доступны в `PATH`.
 
-Dockerfile сделан по схеме из инструкций хостинга: `python:3.12-slim-bookworm` + `apt-get install ffmpeg` внутри image. Если проект запущен как обычный Python egg, этот Dockerfile не используется, поэтому `ffmpeg` внутри контейнера не появится.
+Dockerfile сделан по схеме из инструкций хостинга: `python:3.11-slim-bookworm` + `apt-get install ffmpeg` внутри image. Если проект запущен как обычный Python egg, этот Dockerfile не используется, поэтому `ffmpeg` внутри контейнера не появится.
+
+Для Pterodactyl/BotHost egg, который игнорирует репозиторный Dockerfile, используйте отдельный образ:
+
+```text
+ghcr.io/dw1rf/pohabshina-bot:pterodactyl-voice
+```
+
+Его собирает GitHub Actions из `Dockerfile.pterodactyl`. В настройках Pterodactyl нужно заменить Docker Image старого Python egg на этот образ и сделать rebuild/redeploy. Подробная инструкция: `docs/pterodactyl-voice-image.md`.
 
 Для Bothost `agentv3` в `requirements.txt` также добавлен `ffmpeg-python`: проект не использует его API напрямую, но генератор Bothost по этой зависимости автоматически добавляет системный apt-пакет `ffmpeg` в сгенерированный Dockerfile.
 
