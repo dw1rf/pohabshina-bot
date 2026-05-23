@@ -18,8 +18,10 @@ RUN apt-get update \
 
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
     && command -v ffmpeg \
+    && command -v ffprobe \
     && command -v deno \
     && ffmpeg -version \
+    && ffprobe -version \
     && deno --version
 
 COPY requirements.txt .

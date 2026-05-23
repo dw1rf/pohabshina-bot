@@ -48,14 +48,30 @@ Dockerfile сделан по схеме из инструкций хостинг
 
 Для Bothost `agentv3` в `requirements.txt` также добавлен `ffmpeg-python`: проект не использует его API напрямую, но генератор Bothost по этой зависимости автоматически добавляет системный apt-пакет `ffmpeg` в сгенерированный Dockerfile.
 
+Стартовый файл проекта — `bot.py`. В Dockerfile он запускается как `python -u bot.py`; в Pterodactyl startup command должен быть тот же entrypoint, если сервер запускается не через `CMD` из Dockerfile.
+
 Если в логах остаётся ошибка `shutil.which('ffmpeg') returned nothing`, значит хостинг запустил не этот Dockerfile или контейнер не был пересобран. Пересоберите image с нуля и проверьте внутри контейнера:
 
 ```bash
 which ffmpeg
 ffmpeg -version
+which ffprobe
+ffprobe -version
 which deno
 deno --version
 ```
+
+При успешном старте бот пишет в лог:
+
+```text
+Voice runtime: PATH=...
+ffmpeg found: path=/usr/bin/ffmpeg version=ffmpeg version ...
+ffprobe found: path=/usr/bin/ffprobe version=ffprobe version ...
+deno found: path=/usr/local/bin/deno version=deno ...
+PyNaCl is installed; Discord voice support can load.
+```
+
+Если вместо этого есть `FFmpeg не найден в контейнере`, значит запущенный контейнер/egg всё ещё собран без системного apt-пакета `ffmpeg`.
 
 ---
 

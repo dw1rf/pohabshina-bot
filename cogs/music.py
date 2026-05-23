@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import shutil
-import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -15,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.voice_runtime import FFMPEG_MISSING_MESSAGE, find_ffmpeg, log_binary_version, require_ffmpeg
 
 try:
     import yt_dlp
@@ -254,7 +253,7 @@ class MusicCog(commands.Cog):
             logger.info("Music cog found FFmpeg: %s", ffmpeg_path)
             self.log_ffmpeg_details(ffmpeg_path)
         else:
-            logger.error("FFmpeg не установлен в контейнере. Music cog loaded, but playback commands will return an error.")
+            logger.error("%s Music cog loaded, but playback commands will return an error.", FFMPEG_MISSING_MESSAGE)
 
     async def init_db(self) -> None:
         if self.bot.db is None:
@@ -355,7 +354,7 @@ class MusicCog(commands.Cog):
 
     def voice_dependency_error(self) -> str | None:
         if self.ffmpeg_executable() is None:
-            return "FFmpeg не установлен в контейнере. Поставь системный ffmpeg в Docker image/egg."
+            return FFMPEG_MISSING_MESSAGE
         try:
             import nacl  # noqa: F401
         except ImportError:
@@ -368,7 +367,7 @@ class MusicCog(commands.Cog):
         if self._ffmpeg_executable:
             return self._ffmpeg_executable
 
-        system_ffmpeg = shutil.which("ffmpeg")
+        system_ffmpeg = find_ffmpeg()
         if system_ffmpeg:
             if "imageio_ffmpeg" in system_ffmpeg.replace("\\", "/"):
                 logger.warning(
@@ -378,7 +377,7 @@ class MusicCog(commands.Cog):
             self._ffmpeg_executable = system_ffmpeg
             return self._ffmpeg_executable
 
-        logger.error("FFmpeg не установлен в контейнере: shutil.which('ffmpeg') returned nothing")
+        logger.error("%s find_ffmpeg() returned nothing", FFMPEG_MISSING_MESSAGE)
         return None
 
     def log_ffmpeg_details(self, ffmpeg_executable: str) -> None:
@@ -390,22 +389,7 @@ class MusicCog(commands.Cog):
                 "FFmpeg path points to imageio-ffmpeg fallback; production should use system FFmpeg: %s",
                 ffmpeg_executable,
             )
-        try:
-            completed = subprocess.run(
-                [ffmpeg_executable, "-version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            first_line = (completed.stdout or completed.stderr or "").splitlines()[0:1]
-            logger.info(
-                "Using FFmpeg executable: path=%s version=%s",
-                ffmpeg_executable,
-                first_line[0] if first_line else "unknown",
-            )
-        except Exception:
-            logger.exception("Failed to inspect FFmpeg executable: path=%s", ffmpeg_executable)
+        log_binary_version(logger, "ffmpeg", ffmpeg_executable, "-version")
 
     def ffmpeg_audio_options(self, volume: float) -> str:
         safe_volume = max(0.0, min(1.5, volume))
@@ -613,11 +597,8 @@ class MusicCog(commands.Cog):
         self.now_playing[guild_id] = track
 
         try:
-            ffmpeg_executable = self.ffmpeg_executable()
-            if ffmpeg_executable is None:
-                logger.error("Cannot start track: ffmpeg executable is unavailable")
-                self.now_playing.pop(guild_id, None)
-                return False
+            ffmpeg_executable = require_ffmpeg()
+            self._ffmpeg_executable = ffmpeg_executable
             logger.info("Preparing FFmpeg audio source: guild=%s ffmpeg=%s", guild_id, ffmpeg_executable)
             self.log_ffmpeg_details(ffmpeg_executable)
             source = discord.FFmpegOpusAudio(

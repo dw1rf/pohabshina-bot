@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import shutil
 import tempfile
 import time
 import unicodedata
@@ -16,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.voice_runtime import FFMPEG_MISSING_MESSAGE, find_ffmpeg, require_ffmpeg
 
 try:
     import edge_tts
@@ -201,9 +201,9 @@ class TTSVoiceCog(commands.Cog):
     def ffmpeg_executable(self) -> str | None:
         if self._ffmpeg_executable:
             return self._ffmpeg_executable
-        ffmpeg_path = shutil.which("ffmpeg")
+        ffmpeg_path = find_ffmpeg()
         if not ffmpeg_path:
-            logger.error("FFmpeg is not installed or not found in PATH; TTS playback is unavailable.")
+            logger.error("%s TTS playback is unavailable.", FFMPEG_MISSING_MESSAGE)
             return None
         self._ffmpeg_executable = ffmpeg_path
         return self._ffmpeg_executable
@@ -212,7 +212,7 @@ class TTSVoiceCog(commands.Cog):
         if edge_tts is None:
             return "edge-tts не установлен. Добавь зависимость edge-tts и перезапусти бота."
         if self.ffmpeg_executable() is None:
-            return "FFmpeg не установлен в контейнере. Нужно добавить его в Docker image/egg."
+            return FFMPEG_MISSING_MESSAGE
         try:
             import nacl  # noqa: F401
         except ImportError:
@@ -318,9 +318,14 @@ class TTSVoiceCog(commands.Cog):
             raise
 
     async def play_file(self, guild: discord.Guild, file_path: Path) -> bool:
-        ffmpeg_path = self.ffmpeg_executable()
+        try:
+            ffmpeg_path = require_ffmpeg()
+        except RuntimeError as exc:
+            logger.error("Cannot play TTS file: %s", exc)
+            return False
+        self._ffmpeg_executable = ffmpeg_path
         voice_client = guild.voice_client
-        if ffmpeg_path is None or not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_connected():
+        if not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_connected():
             return False
         if voice_client.is_playing() or voice_client.is_paused():
             logger.warning("Voice client is already playing while TTS tried to start: guild=%s", guild.id)

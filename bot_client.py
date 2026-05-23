@@ -21,6 +21,7 @@ from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
 from services.social_game_service import SocialGameService
 from utils.command_localizations import RussianCommandNameTranslator
+from utils.voice_runtime import log_voice_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ class MovieBot(commands.Bot):
         await self.support_tickets.init_db(self.db)
         await self.social_games.init_db(self.db)
         await self.watchmode.load_genres(self.session)
+        log_voice_runtime(logger)
 
         loaded_cogs = await self.load_cogs()
 
