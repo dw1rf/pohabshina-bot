@@ -3,8 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -22,17 +21,29 @@ except ImportError:  # pragma: no cover - handled at runtime for clearer Discord
 
 logger = logging.getLogger(__name__)
 
-YTDL_OPTIONS: dict[str, Any] = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "default_search": "ytsearch",
-    "extract_flat": False,
-    "source_address": "0.0.0.0",
-    "js_runtimes": {"deno": {}},
-}
 FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+FFMPEG_OPTIONS = "-vn"
+MAX_QUEUE_PAGE_VALUE = 950
+MAX_PLAYLIST_TRACKS = 100
 URL_PREFIXES = ("http://", "https://")
+
+YTDL_BASE_OPTIONS: dict[str, Any] = {
+    "format": "bestaudio/best",
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "ytsearch",
+    "source_address": "0.0.0.0",
+    "extract_flat": False,
+    "ignoreerrors": True,
+}
+
+
+class MusicUserError(Exception):
+    """A user-facing music error with a safe Russian message."""
+
+
+class ExternalPlaylistNotConfigured(MusicUserError):
+    pass
 
 
 @dataclass(slots=True)
@@ -40,23 +51,31 @@ class Track:
     title: str
     webpage_url: str
     stream_url: str
-    requested_by_id: int
-    requested_by_name: str
-    duration: int | None = None
-    uploader: str | None = None
+    duration: int | None
+    requester_id: int
+    requester_name: str
     thumbnail: str | None = None
 
 
 @dataclass(slots=True)
-class MusicGuildSettings:
-    volume: float = 0.5
-    loop: bool = False
-    shuffle: bool = False
+class MusicPlayer:
+    guild_id: int
+    voice_client: discord.VoiceClient | None = None
+    queue: list[Track] = field(default_factory=list)
+    current: Track | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    is_paused: bool = False
+    shuffle_enabled: bool = False
+    autoplay_enabled: bool = False
+    audio_player_task: asyncio.Task[None] | None = None
     stopped: bool = False
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).isoformat()
+def _short(text: str | None, limit: int) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 1)].rstrip() + "…"
 
 
 def _format_duration(seconds: int | None) -> str:
@@ -69,314 +88,85 @@ def _format_duration(seconds: int | None) -> str:
     return f"{minutes}:{rest:02d}"
 
 
-def _short(text: str | None, limit: int) -> str:
-    value = " ".join(str(text or "").split())
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1].rstrip() + "…"
-
-
 def _is_http_url(query: str) -> bool:
-    lowered = query.strip().lower()
-    return lowered.startswith(URL_PREFIXES)
+    return query.strip().lower().startswith(URL_PREFIXES)
 
 
 def _is_safe_url(query: str) -> bool:
-    stripped = query.strip()
-    lowered = stripped.lower()
-    if len(stripped) > 2000:
+    value = query.strip()
+    lowered = value.lower()
+    if len(value) > 2000:
         return False
     if not lowered.startswith(URL_PREFIXES):
-        return False
-    if lowered.startswith(("file://", "ftp://")):
         return False
     return "../" not in lowered and "..\\" not in lowered
 
 
-def _is_rejected_music_url(query: str) -> bool:
-    parsed = urlparse(query.strip())
-    host = (parsed.netloc or "").lower()
-    path = (parsed.path or "").lower()
-    return host in {"discord.com", "www.discord.com", "discordapp.com", "www.discordapp.com"} and path.startswith(
-        "/oauth2/"
-    )
+def _host_matches(host: str, *suffixes: str) -> bool:
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
 
 
-def _can_manage_music(user: discord.Member | discord.User) -> bool:
-    if not isinstance(user, discord.Member):
+def _is_spotify_or_apple(query: str) -> bool:
+    try:
+        host = urlparse(query).netloc.lower()
+    except ValueError:
         return False
-    perms = user.guild_permissions
-    return perms.administrator or perms.manage_guild
+    return _host_matches(host, "spotify.com", "music.apple.com")
 
 
-class MusicSearchModal(discord.ui.Modal, title="Найти / включить музыку"):
-    query = discord.ui.TextInput(
-        label="Название песни или URL",
-        placeholder="Например: crystal castles vanished или https://youtube.com/...",
-        max_length=300,
+def _track_from_info(info: dict[str, Any], requester: discord.Member | discord.User) -> Track | None:
+    title = info.get("title") or "Без названия"
+    webpage_url = info.get("webpage_url") or info.get("original_url")
+    if not webpage_url and info.get("id"):
+        webpage_url = f"https://www.youtube.com/watch?v={info['id']}"
+    stream_url = info.get("url")
+    if not webpage_url or not stream_url:
+        return None
+    requester_name = getattr(requester, "display_name", None) or getattr(requester, "name", None) or "Пользователь"
+    return Track(
+        title=str(title),
+        webpage_url=str(webpage_url),
+        stream_url=str(stream_url),
+        duration=info.get("duration"),
+        requester_id=requester.id,
+        requester_name=requester_name,
+        thumbnail=info.get("thumbnail"),
     )
-
-    def __init__(self, cog: "MusicCog") -> None:
-        super().__init__()
-        self.cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.handle_query_interaction(interaction, str(self.query), from_panel=True)
-
-
-class MusicVolumeModal(discord.ui.Modal, title="Громкость"):
-    volume = discord.ui.TextInput(label="Громкость 0-100", placeholder="65", max_length=3)
-
-    def __init__(self, cog: "MusicCog") -> None:
-        super().__init__()
-        self.cog = cog
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog.handle_volume_submit(interaction, str(self.volume))
-
-
-class MusicSearchSelect(discord.ui.Select):
-    def __init__(self, cog: "MusicCog", tracks: list[Track]) -> None:
-        self.cog = cog
-        self.tracks = tracks
-        options = [
-            discord.SelectOption(
-                label=_short(track.title, 100) or "Без названия",
-                description=_short(f"{track.uploader or 'неизвестный автор'} • {_format_duration(track.duration)}", 100),
-                value=str(index),
-                emoji="🎵",
-            )
-            for index, track in enumerate(tracks[:5])
-        ]
-        super().__init__(placeholder="Выбери трек из музыкальной помойки", options=options, min_values=1, max_values=1)
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        index = int(self.values[0])
-        track = self.tracks[index]
-        logger.info("Music search result selected: guild=%s title=%s", interaction.guild_id, track.title)
-        await self.cog.enqueue_or_play_interaction(interaction, track)
-
-
-class MusicSearchSelectView(discord.ui.View):
-    def __init__(self, cog: "MusicCog", tracks: list[Track]) -> None:
-        super().__init__(timeout=120)
-        self.add_item(MusicSearchSelect(cog, tracks))
-
-
-class QueueControlView(discord.ui.View):
-    def __init__(self, cog: "MusicCog", guild_id: int) -> None:
-        super().__init__(timeout=120)
-        self.cog = cog
-        self.guild_id = guild_id
-
-    @discord.ui.button(label="Очистить очередь", emoji="🧹", style=discord.ButtonStyle.danger)
-    async def clear_queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self.cog.ensure_can_control(interaction):
-            return
-        self.cog.queues[self.guild_id] = []
-        await self.cog.update_panel(self.guild_id)
-        await self.cog.send_interaction_message(interaction, "🧹 Очередь вычищена до скрипа.", ephemeral=True)
-
-    @discord.ui.button(label="Перемешать", emoji="🔀", style=discord.ButtonStyle.secondary)
-    async def shuffle_queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if not await self.cog.ensure_can_control(interaction):
-            return
-        random.shuffle(self.cog.queues.setdefault(self.guild_id, []))
-        await self.cog.update_panel(self.guild_id)
-        await self.cog.send_interaction_message(interaction, "🔀 Очередь перемешана.", ephemeral=True)
-
-
-class MusicPanelView(discord.ui.View):
-    def __init__(self, cog: "MusicCog") -> None:
-        super().__init__(timeout=None)
-        self.cog = cog
-
-    @discord.ui.button(label="Найти / Включить", emoji="🔎", style=discord.ButtonStyle.primary, custom_id="music:search", row=0)
-    async def search(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(MusicSearchModal(self.cog))
-
-    @discord.ui.button(label="Пауза / Продолжить", emoji="⏯️", style=discord.ButtonStyle.secondary, custom_id="music:pause_resume", row=0)
-    async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.pause_resume_action(interaction)
-
-    @discord.ui.button(label="Скип", emoji="⏭️", style=discord.ButtonStyle.secondary, custom_id="music:skip", row=0)
-    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.skip_action(interaction)
-
-    @discord.ui.button(label="Стоп", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="music:stop", row=0)
-    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.stop_action(interaction)
-
-    @discord.ui.button(label="Выйти", emoji="👋", style=discord.ButtonStyle.danger, custom_id="music:leave", row=0)
-    async def leave(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.leave_action(interaction)
-
-    @discord.ui.button(label="Очередь", emoji="📜", style=discord.ButtonStyle.secondary, custom_id="music:queue", row=1)
-    async def queue(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.queue_action(interaction)
-
-    @discord.ui.button(label="Громкость", emoji="🔊", style=discord.ButtonStyle.secondary, custom_id="music:volume", row=1)
-    async def volume(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await interaction.response.send_modal(MusicVolumeModal(self.cog))
-
-    @discord.ui.button(label="Loop", emoji="🔁", style=discord.ButtonStyle.secondary, custom_id="music:loop", row=1)
-    async def loop(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.loop_action(interaction)
-
-    @discord.ui.button(label="Shuffle", emoji="🔀", style=discord.ButtonStyle.secondary, custom_id="music:shuffle", row=1)
-    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        await self.cog.shuffle_action(interaction)
-
-    @discord.ui.button(label="Обновить", emoji="🔄", style=discord.ButtonStyle.secondary, custom_id="music:refresh", row=1)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.guild is None:
-            await self.cog.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return
-        await self.cog.update_panel(interaction.guild.id)
-        await self.cog.send_interaction_message(interaction, "🔄 Обновил пульт.", ephemeral=True)
 
 
 class MusicCog(commands.Cog):
-    music_group = app_commands.Group(name="music", description="Управление музыкальным пультом")
+    music_group = app_commands.Group(name="music", description="Музыка: YouTube, очередь и управление голосом")
 
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
-        self.queues: dict[int, list[Track]] = {}
-        self.now_playing: dict[int, Track] = {}
-        self.settings: dict[int, MusicGuildSettings] = {}
-        self.panel_messages: dict[int, tuple[int, int]] = {}
+        self.players: dict[int, MusicPlayer] = {}
         self._ffmpeg_executable: str | None = None
         self._ffmpeg_logged = False
-        self.bot.add_view(MusicPanelView(self))
         ffmpeg_path = self.ffmpeg_executable()
         if ffmpeg_path:
             logger.info("Music cog found FFmpeg: %s", ffmpeg_path)
             self.log_ffmpeg_details(ffmpeg_path)
         else:
-            logger.error("%s Music cog loaded, but playback commands will return an error.", FFMPEG_MISSING_MESSAGE)
+            logger.error("%s Music playback commands will return a clear user error.", FFMPEG_MISSING_MESSAGE)
 
-    async def init_db(self) -> None:
-        if self.bot.db is None:
-            logger.error("Music cog loaded without database connection")
-            return
-        await self.bot.db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS music_settings (
-                guild_id INTEGER PRIMARY KEY,
-                volume REAL NOT NULL DEFAULT 0.5,
-                loop INTEGER NOT NULL DEFAULT 0,
-                shuffle INTEGER NOT NULL DEFAULT 0,
-                panel_channel_id INTEGER,
-                panel_message_id INTEGER,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        await self.bot.db.commit()
-        await self.load_music_settings()
+    def cog_unload(self) -> None:
+        for guild_id in list(self.players):
+            self.bot.loop.create_task(self.shutdown_player(guild_id, disconnect=True))
 
-    async def load_music_settings(self) -> None:
-        if self.bot.db is None:
-            return
-        cursor = await self.bot.db.execute(
-            "SELECT guild_id, volume, loop, shuffle, panel_channel_id, panel_message_id FROM music_settings"
-        )
-        for row in await cursor.fetchall():
-            guild_id = int(row["guild_id"])
-            self.settings[guild_id] = MusicGuildSettings(
-                volume=max(0.0, min(1.0, float(row["volume"]))),
-                loop=bool(row["loop"]),
-                shuffle=bool(row["shuffle"]),
-            )
-            if row["panel_channel_id"] and row["panel_message_id"]:
-                self.panel_messages[guild_id] = (int(row["panel_channel_id"]), int(row["panel_message_id"]))
-
-    async def get_settings(self, guild_id: int) -> MusicGuildSettings:
-        if guild_id in self.settings:
-            return self.settings[guild_id]
-        settings = MusicGuildSettings()
-        self.settings[guild_id] = settings
-        if self.bot.db is not None:
-            await self.bot.db.execute(
-                """
-                INSERT OR IGNORE INTO music_settings (guild_id, volume, loop, shuffle, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (guild_id, settings.volume, int(settings.loop), int(settings.shuffle), _now_iso()),
-            )
-            await self.bot.db.commit()
-        return settings
-
-    async def save_settings(self, guild_id: int) -> None:
-        if self.bot.db is None:
-            return
-        settings = await self.get_settings(guild_id)
-        panel_channel_id, panel_message_id = self.panel_messages.get(guild_id, (None, None))
-        await self.bot.db.execute(
-            """
-            INSERT INTO music_settings (guild_id, volume, loop, shuffle, panel_channel_id, panel_message_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                volume = excluded.volume,
-                loop = excluded.loop,
-                shuffle = excluded.shuffle,
-                panel_channel_id = excluded.panel_channel_id,
-                panel_message_id = excluded.panel_message_id,
-                updated_at = excluded.updated_at
-            """,
-            (
-                guild_id,
-                settings.volume,
-                int(settings.loop),
-                int(settings.shuffle),
-                panel_channel_id,
-                panel_message_id,
-                _now_iso(),
-            ),
-        )
-        await self.bot.db.commit()
-
-    async def clear_saved_panel(self, guild_id: int) -> None:
-        self.panel_messages.pop(guild_id, None)
-        if self.bot.db is None:
-            return
-        await self.bot.db.execute(
-            """
-            UPDATE music_settings
-            SET panel_channel_id = NULL,
-                panel_message_id = NULL,
-                updated_at = ?
-            WHERE guild_id = ?
-            """,
-            (_now_iso(), guild_id),
-        )
-        await self.bot.db.commit()
-
-    def voice_dependency_error(self) -> str | None:
-        if self.ffmpeg_executable() is None:
-            return FFMPEG_MISSING_MESSAGE
-        try:
-            import nacl  # noqa: F401
-        except ImportError:
-            return "Голосовой модуль Discord не установлен. Проверь discord.py[voice] и PyNaCl."
-        if yt_dlp is None:
-            return "yt-dlp не установлен. Без него я не достану аудио из музыкальной помойки."
-        return None
+    def get_player(self, guild_id: int) -> MusicPlayer:
+        player = self.players.get(guild_id)
+        if player is None:
+            player = MusicPlayer(guild_id=guild_id)
+            self.players[guild_id] = player
+        return player
 
     def ffmpeg_executable(self) -> str | None:
         if self._ffmpeg_executable:
             return self._ffmpeg_executable
-
-        system_ffmpeg = find_ffmpeg()
-        if system_ffmpeg:
-            if "imageio_ffmpeg" in system_ffmpeg.replace("\\", "/"):
-                logger.warning(
-                    "FFmpeg path points to imageio-ffmpeg fallback; production should use system FFmpeg: %s",
-                    system_ffmpeg,
-                )
-            self._ffmpeg_executable = system_ffmpeg
-            return self._ffmpeg_executable
-
+        ffmpeg_path = find_ffmpeg()
+        if ffmpeg_path:
+            self._ffmpeg_executable = ffmpeg_path
+            return ffmpeg_path
         logger.error("%s find_ffmpeg() returned nothing", FFMPEG_MISSING_MESSAGE)
         return None
 
@@ -384,16 +174,19 @@ class MusicCog(commands.Cog):
         if self._ffmpeg_logged:
             return
         self._ffmpeg_logged = True
-        if "imageio_ffmpeg" in ffmpeg_executable.replace("\\", "/"):
-            logger.warning(
-                "FFmpeg path points to imageio-ffmpeg fallback; production should use system FFmpeg: %s",
-                ffmpeg_executable,
-            )
         log_binary_version(logger, "ffmpeg", ffmpeg_executable, "-version")
 
-    def ffmpeg_audio_options(self, volume: float) -> str:
-        safe_volume = max(0.0, min(1.5, volume))
-        return f"-vn -filter:a volume={safe_volume:.2f}"
+    def dependency_error(self) -> str | None:
+        if self.ffmpeg_executable() is None:
+            logger.error("%s", FFMPEG_MISSING_MESSAGE)
+            return "FFmpeg не найден. Попросите администратора установить системный ffmpeg и перезапустить бота."
+        try:
+            import nacl  # noqa: F401
+        except ImportError:
+            return "Голосовой модуль Discord не установлен. Проверьте discord.py[voice] и PyNaCl."
+        if yt_dlp is None:
+            return "yt-dlp не установлен. Без него я не могу искать и включать музыку."
+        return None
 
     async def send_interaction_message(
         self,
@@ -401,519 +194,832 @@ class MusicCog(commands.Cog):
         content: str | None = None,
         *,
         embed: discord.Embed | None = None,
-        view: discord.ui.View | None = None,
         ephemeral: bool = True,
     ) -> None:
-        kwargs: dict[str, Any] = {
-            "ephemeral": ephemeral,
-            "allowed_mentions": discord.AllowedMentions.none(),
-        }
+        kwargs: dict[str, Any] = {"ephemeral": ephemeral, "allowed_mentions": discord.AllowedMentions.none()}
         if content is not None:
             kwargs["content"] = content
         if embed is not None:
             kwargs["embed"] = embed
-        if view is not None:
-            kwargs["view"] = view
         if interaction.response.is_done():
             await interaction.followup.send(**kwargs)
         else:
             await interaction.response.send_message(**kwargs)
 
-    async def ensure_voice(self, interaction: discord.Interaction) -> discord.VoiceClient | None:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            await self.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return None
-        dependency_error = self.voice_dependency_error()
-        if dependency_error:
-            await self.send_interaction_message(interaction, dependency_error, ephemeral=True)
+    async def send_context_message(
+        self,
+        ctx: commands.Context[MovieBot],
+        content: str | None = None,
+        *,
+        embed: discord.Embed | None = None,
+    ) -> None:
+        await ctx.reply(content=content, embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+    def _tts_session_active(self, guild_id: int) -> bool:
+        tts_cog = self.bot.get_cog("TTSVoiceCog")
+        sessions = getattr(tts_cog, "sessions", None)
+        return isinstance(sessions, dict) and guild_id in sessions
+
+    async def ensure_voice(
+        self,
+        guild: discord.Guild | None,
+        user: discord.Member | discord.User,
+        *,
+        send_error: Any,
+    ) -> discord.VoiceClient | None:
+        if guild is None or not isinstance(user, discord.Member):
+            await send_error("Команда доступна только на сервере.")
             return None
 
-        user_voice = interaction.user.voice
+        dependency_error = self.dependency_error()
+        if dependency_error:
+            await send_error(dependency_error)
+            return None
+
+        user_voice = user.voice
         if user_voice is None or user_voice.channel is None:
-            await self.send_interaction_message(interaction, "Сначала зайди в голосовой канал, кожаный. Я не буду петь в пустоту.", ephemeral=True)
+            await send_error("Зайди в голосовой канал.")
+            return None
+
+        if self._tts_session_active(guild.id):
+            await send_error("Сейчас активна озвучка TTS. Сначала выключите TTS или дождитесь окончания.")
             return None
 
         channel = user_voice.channel
-        me = interaction.guild.me
-        permissions = channel.permissions_for(me)
-        if not permissions.connect or not permissions.speak:
-            await self.send_interaction_message(interaction, "У меня нет прав зайти или говорить в этом голосовом канале.", ephemeral=True)
+        me = guild.me
+        if me is not None:
+            permissions = channel.permissions_for(me)
+            if not permissions.connect or not permissions.speak:
+                await send_error("У меня нет прав зайти или говорить в этом голосовом канале.")
+                return None
+
+        player = self.get_player(guild.id)
+        voice_client = guild.voice_client
+        if isinstance(voice_client, discord.VoiceClient):
+            player.voice_client = voice_client
+            if voice_client.channel != channel:
+                await send_error("Бот уже подключён к другому голосовому каналу на этом сервере.")
+                return None
+            if (voice_client.is_playing() or voice_client.is_paused()) and player.current is None:
+                await send_error("Бот уже занят другим голосовым модулем.")
+                return None
+            return voice_client
+
+        try:
+            logger.info("Music connecting: guild=%s channel=%s", guild.id, channel.id)
+            connected = await channel.connect(timeout=15, reconnect=True)
+        except (TimeoutError, discord.Forbidden, discord.ClientException, discord.HTTPException):
+            logger.exception("Music voice connection failed: guild=%s channel=%s", guild.id, channel.id)
+            await send_error("Не удалось подключиться к голосовому каналу.")
             return None
 
-        voice_client = interaction.guild.voice_client
-        try:
-            if isinstance(voice_client, discord.VoiceClient):
-                if voice_client.channel != channel:
-                    logger.info("Moving voice client: guild=%s channel=%s", interaction.guild.id, channel.id)
-                    await voice_client.move_to(channel)
-                return voice_client
-
-            logger.info("Connecting voice client: guild=%s channel=%s", interaction.guild.id, channel.id)
-            connected = await channel.connect()
-            if isinstance(connected, discord.VoiceClient):
-                return connected
-        except (discord.Forbidden, discord.ClientException, discord.HTTPException):
-            logger.exception("Discord voice connection failed")
-            await self.send_interaction_message(interaction, "У меня нет прав зайти или говорить в этом голосовом канале.", ephemeral=True)
+        if isinstance(connected, discord.VoiceClient):
+            player.voice_client = connected
+            return connected
+        await send_error("Не удалось создать голосовое подключение.")
         return None
 
-    async def ensure_can_control(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            await self.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return False
-        if _can_manage_music(interaction.user):
-            return True
-        voice_client = interaction.guild.voice_client
+    async def ensure_can_control(
+        self,
+        guild: discord.Guild | None,
+        user: discord.Member | discord.User,
+        *,
+        send_error: Any,
+    ) -> MusicPlayer | None:
+        if guild is None or not isinstance(user, discord.Member):
+            await send_error("Команда доступна только на сервере.")
+            return None
+        player = self.get_player(guild.id)
+        voice_client = guild.voice_client
         if not isinstance(voice_client, discord.VoiceClient) or voice_client.channel is None:
-            await self.send_interaction_message(interaction, "Сейчас ничего не играет. Даже демоны молчат.", ephemeral=True)
-            return False
-        user_voice = interaction.user.voice
+            await send_error("Сейчас ничего не играет.")
+            return None
+        user_voice = user.voice
+        if user.guild_permissions.administrator or user.guild_permissions.manage_guild:
+            player.voice_client = voice_client
+            return player
         if user_voice and user_voice.channel == voice_client.channel:
-            return True
-        await self.send_interaction_message(interaction, "Ты даже не в моём голосовом канале. Командовать издалека не выйдет.", ephemeral=True)
-        return False
+            player.voice_client = voice_client
+            return player
+        await send_error("Ты должен быть в том же голосовом канале, что и бот.")
+        return None
 
-    async def extract_tracks(self, query: str, requested_by: discord.Member | discord.User, *, search: bool) -> tuple[list[Track], bool]:
+    async def extract_tracks(
+        self,
+        query: str,
+        requester: discord.Member | discord.User,
+        *,
+        allow_playlist: bool,
+    ) -> tuple[list[Track], bool]:
         if yt_dlp is None:
             raise RuntimeError("yt-dlp is not installed")
-        search_query = f"ytsearch5:{query}" if search else query
-        logger.info("yt-dlp extract: search=%s query=%s", search, query)
-        loop = asyncio.get_running_loop()
+        clean_query = " ".join(query.split())
+        if _is_spotify_or_apple(clean_query):
+            raise ExternalPlaylistNotConfigured("Поддержка плейлистов Spotify/Apple пока не настроена.")
 
-        def extract() -> dict[str, Any]:
-            with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ytdl:
-                return ytdl.extract_info(search_query, download=False)
+        is_url = _is_http_url(clean_query)
+        ytdl_query = clean_query if is_url else f"ytsearch1:{clean_query}"
+        options = {
+            **YTDL_BASE_OPTIONS,
+            "noplaylist": not allow_playlist,
+            "playlistend": MAX_PLAYLIST_TRACKS,
+        }
+        logger.info("yt-dlp extract: query=%s playlist=%s", clean_query, allow_playlist)
 
-        data = await loop.run_in_executor(None, extract)
-        playlist_detected = False
-        entries = data.get("entries") if isinstance(data, dict) else None
+        def extract() -> dict[str, Any] | None:
+            with yt_dlp.YoutubeDL(options) as ytdl:
+                return ytdl.extract_info(ytdl_query, download=False)
+
+        data = await asyncio.to_thread(extract)
+        if not isinstance(data, dict):
+            return [], False
+
+        entries = data.get("entries")
+        playlist_detected = bool(entries) and is_url
+        raw_items: list[dict[str, Any]] = []
         if entries:
-            playlist_detected = not search
-            items = [entry for entry in entries if entry][:5]
-        elif isinstance(data, dict):
-            items = [data]
+            raw_items.extend(entry for entry in entries if isinstance(entry, dict))
         else:
-            items = []
+            raw_items.append(data)
 
         tracks: list[Track] = []
-        for item in items:
-            stream_url = item.get("url")
-            webpage_url = item.get("webpage_url") or item.get("original_url") or item.get("url")
-            title = item.get("title") or "Без названия"
-            if not stream_url or not webpage_url:
-                continue
-            tracks.append(
-                Track(
-                    title=str(title),
-                    webpage_url=str(webpage_url),
-                    stream_url=str(stream_url),
-                    requested_by_id=requested_by.id,
-                    requested_by_name=getattr(requested_by, "display_name", requested_by.name),
-                    duration=item.get("duration"),
-                    uploader=item.get("uploader") or item.get("channel"),
-                    thumbnail=item.get("thumbnail"),
-                )
-            )
+        for item in raw_items[:MAX_PLAYLIST_TRACKS]:
+            track = _track_from_info(item, requester)
+            if track is not None:
+                tracks.append(track)
         return tracks, playlist_detected
 
-    async def handle_query_interaction(self, interaction: discord.Interaction, query: str, *, from_panel: bool = False) -> None:
-        clean_query = " ".join(str(query or "").split())
-        if not clean_query:
-            await self.send_interaction_message(interaction, "Скорми мне название или URL, не воздух.", ephemeral=True)
-            return
-        if _is_http_url(clean_query) and not _is_safe_url(clean_query):
-            await self.send_interaction_message(interaction, "Ссылка тухлая или небезопасная. Жру только http/https без странных трюков.", ephemeral=True)
-            return
-        if _is_http_url(clean_query) and _is_rejected_music_url(clean_query):
-            await self.send_interaction_message(interaction, "Это не музыкальная ссылка. Дай YouTube/SoundCloud или нормальный поисковый запрос.", ephemeral=True)
-            return
-        if not _is_http_url(clean_query) and ("://" in clean_query or "../" in clean_query or "..\\" in clean_query):
-            await self.send_interaction_message(interaction, "Такой путь я не ем. Дай нормальный URL или название трека.", ephemeral=True)
-            return
+    async def refresh_stream_url(self, track: Track) -> Track:
+        if yt_dlp is None:
+            raise RuntimeError("yt-dlp is not installed")
+        options = {**YTDL_BASE_OPTIONS, "noplaylist": True}
 
-        if not interaction.response.is_done():
-            await interaction.response.defer(thinking=True, ephemeral=not _is_http_url(clean_query))
+        def extract() -> dict[str, Any] | None:
+            with yt_dlp.YoutubeDL(options) as ytdl:
+                return ytdl.extract_info(track.webpage_url, download=False)
 
+        data = await asyncio.to_thread(extract)
+        if not isinstance(data, dict):
+            raise RuntimeError("yt-dlp returned no track info")
+        refreshed = _track_from_info(
+            data,
+            discord.Object(id=track.requester_id),  # type: ignore[arg-type]
+        )
+        if refreshed is None:
+            raise RuntimeError("yt-dlp returned no playable stream")
+        refreshed.requester_id = track.requester_id
+        refreshed.requester_name = track.requester_name
+        return refreshed
+
+    async def add_autoplay_track(self, player: MusicPlayer, previous: Track) -> bool:
+        query = f"{previous.title} music mix"
         try:
-            tracks, playlist_detected = await self.extract_tracks(clean_query, interaction.user, search=not _is_http_url(clean_query))
-        except Exception:
-            logger.exception("yt-dlp failed")
-            await interaction.followup.send("Не смог достать аудио. Ссылка тухлая или сервис сопротивляется.", ephemeral=True)
-            return
-
-        if not tracks:
-            await interaction.followup.send("Я порылся в музыкальной помойке и ничего не нашёл.", ephemeral=True)
-            return
-        if _is_http_url(clean_query):
-            if playlist_detected:
-                await interaction.followup.send("Плейлисты пока не жру целиком. Включаю первый трек.", ephemeral=True)
-            await self.enqueue_or_play_interaction(interaction, tracks[0])
-            return
-
-        embed = discord.Embed(
-            title="🔎 Результаты поиска",
-            description="Выбери трек из списка ниже.",
-            color=discord.Color.blurple(),
-        )
-        await interaction.followup.send(embed=embed, view=MusicSearchSelectView(self, tracks), ephemeral=True)
-
-    async def enqueue_or_play_interaction(self, interaction: discord.Interaction, track: Track) -> None:
-        if interaction.guild is None:
-            await self.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return
-        voice_client = await self.ensure_voice(interaction)
-        if voice_client is None:
-            return
-
-        queue = self.queues.setdefault(interaction.guild.id, [])
-        if voice_client.is_playing() or voice_client.is_paused() or interaction.guild.id in self.now_playing:
-            queue.append(track)
-            logger.info("Track queued: guild=%s title=%s", interaction.guild.id, track.title)
-            await self.update_panel(interaction.guild.id)
-            await self.send_interaction_message(
-                interaction,
-                embed=self.simple_embed("➕ Добавлено в очередь", f"**{track.title}**", track),
-                ephemeral=False,
+            tracks, _ = await self.extract_tracks(
+                query,
+                discord.Object(id=previous.requester_id),  # type: ignore[arg-type]
+                allow_playlist=False,
             )
-            return
-
-        started = await self.start_track(interaction.guild.id, voice_client, track)
-        if not started:
-            await self.send_interaction_message(interaction, "FFmpeg подавился этим треком.", ephemeral=True)
-            return
-        await self.send_interaction_message(
-            interaction,
-            embed=self.simple_embed("▶️ Играю", f"**{track.title}**", track),
-            ephemeral=False,
-        )
-
-    async def start_track(self, guild_id: int, voice_client: discord.VoiceClient, track: Track) -> bool:
-        dependency_error = self.voice_dependency_error()
-        if dependency_error:
-            logger.error("Cannot start track: %s", dependency_error)
+        except Exception:
+            logger.exception("Autoplay search failed: guild=%s title=%s", player.guild_id, previous.title)
             return False
-        settings = await self.get_settings(guild_id)
-        settings.stopped = False
-        self.now_playing[guild_id] = track
+        if not tracks:
+            logger.warning("Autoplay found no related track: guild=%s title=%s", player.guild_id, previous.title)
+            return False
+        track = tracks[0]
+        track.requester_id = previous.requester_id
+        track.requester_name = "Автоплей"
+        player.queue.append(track)
+        logger.info("Autoplay queued track: guild=%s title=%s", player.guild_id, track.title)
+        return True
+
+    async def add_tracks(
+        self,
+        guild: discord.Guild,
+        voice_client: discord.VoiceClient,
+        tracks: list[Track],
+        *,
+        mode: str,
+    ) -> tuple[str, Track | None, int]:
+        player = self.get_player(guild.id)
+        player.voice_client = voice_client
+        if not tracks:
+            raise MusicUserError("Ничего не найдено.")
+
+        async with player.lock:
+            player.stopped = False
+            first_track = tracks[0]
+            if mode == "now":
+                player.queue = tracks + player.queue
+                logger.info("Track queued as current: guild=%s title=%s count=%s", guild.id, first_track.title, len(tracks))
+                if voice_client.is_playing() or voice_client.is_paused():
+                    voice_client.stop()
+                    return "now", first_track, len(tracks)
+                started = await self.start_next_locked(player)
+                return "started" if started else "queued", first_track, len(tracks)
+
+            if mode == "next":
+                player.queue = tracks + player.queue
+                logger.info("Track queued next: guild=%s title=%s count=%s", guild.id, first_track.title, len(tracks))
+            else:
+                player.queue.extend(tracks)
+                logger.info("Track queued: guild=%s title=%s count=%s", guild.id, first_track.title, len(tracks))
+
+            if player.current is None and not voice_client.is_playing() and not voice_client.is_paused():
+                started = await self.start_next_locked(player)
+                return "started" if started else "queued", first_track, len(tracks)
+            return mode, first_track, len(tracks)
+
+    async def start_next_locked(self, player: MusicPlayer) -> bool:
+        voice_client = player.voice_client
+        if not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_connected():
+            player.current = None
+            return False
+        while player.queue:
+            index = random.randrange(len(player.queue)) if player.shuffle_enabled else 0
+            track = player.queue.pop(index)
+            if await self.start_track_locked(player, track):
+                return True
+            logger.warning("Skipping unplayable queued track: guild=%s title=%s", player.guild_id, track.title)
+        player.current = None
+        return False
+
+    async def start_track_locked(self, player: MusicPlayer, track: Track) -> bool:
+        voice_client = player.voice_client
+        if not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_connected():
+            player.current = None
+            return False
 
         try:
             ffmpeg_executable = require_ffmpeg()
             self._ffmpeg_executable = ffmpeg_executable
-            logger.info("Preparing FFmpeg audio source: guild=%s ffmpeg=%s", guild_id, ffmpeg_executable)
             self.log_ffmpeg_details(ffmpeg_executable)
-            source = discord.FFmpegOpusAudio(
+            try:
+                track = await self.refresh_stream_url(track)
+            except Exception:
+                logger.exception("yt-dlp failed to refresh stream URL: guild=%s title=%s", player.guild_id, track.title)
+                return False
+            source = discord.FFmpegPCMAudio(
                 track.stream_url,
-                bitrate=128,
-                codec="libopus",
                 executable=ffmpeg_executable,
                 before_options=FFMPEG_BEFORE_OPTIONS,
-                options=self.ffmpeg_audio_options(settings.volume),
+                options=FFMPEG_OPTIONS,
             )
+        except RuntimeError as exc:
+            logger.error("FFmpeg missing for music playback: %s", exc)
+            player.current = None
+            return False
         except Exception:
-            logger.exception("FFmpeg source creation failed")
-            self.now_playing.pop(guild_id, None)
+            logger.exception("FFmpeg source creation failed: guild=%s title=%s", player.guild_id, track.title)
+            player.current = None
             return False
 
         def after_play(error: Exception | None) -> None:
             if error:
-                logger.error("Music playback error", exc_info=(type(error), error, error.__traceback__))
-            asyncio.run_coroutine_threadsafe(self.play_next(guild_id), self.bot.loop)
+                logger.error("Music playback error: guild=%s error=%s", player.guild_id, error)
+            self.bot.loop.call_soon_threadsafe(
+                lambda: self.bot.loop.create_task(self.after_track(player.guild_id, error))
+            )
 
-        logger.info("Starting track: guild=%s title=%s", guild_id, track.title)
         try:
+            player.current = track
+            player.is_paused = False
+            logger.info("Track started: guild=%s title=%s url=%s", player.guild_id, track.title, track.webpage_url)
             voice_client.play(source, after=after_play)
+            return True
         except Exception:
-            logger.exception("FFmpeg playback failed")
-            self.now_playing.pop(guild_id, None)
+            logger.exception("FFmpeg playback failed: guild=%s title=%s", player.guild_id, track.title)
+            player.current = None
             return False
-        await self.update_panel(guild_id)
-        return True
 
-    async def play_next(self, guild_id: int) -> None:
-        settings = await self.get_settings(guild_id)
-        if settings.stopped:
-            await self.update_panel(guild_id)
-            return
-
-        guild = self.bot.get_guild(guild_id)
-        voice_client = guild.voice_client if guild else None
-        if not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_connected():
-            self.now_playing.pop(guild_id, None)
-            await self.update_panel(guild_id)
-            return
-
-        next_track: Track | None = None
-        if settings.loop and guild_id in self.now_playing:
-            next_track = self.now_playing[guild_id]
-        else:
-            queue = self.queues.setdefault(guild_id, [])
-            if queue:
-                if settings.shuffle:
-                    next_track = queue.pop(random.randrange(len(queue)))
-                else:
-                    next_track = queue.pop(0)
-
-        if next_track is None:
-            self.now_playing.pop(guild_id, None)
-            await self.update_panel(guild_id)
-            return
-        await self.start_track(guild_id, voice_client, next_track)
-
-    def simple_embed(self, title: str, description: str, track: Track | None = None) -> discord.Embed:
-        embed = discord.Embed(title=title, description=description, color=discord.Color.green())
-        if track:
-            embed.add_field(name="Заказал", value=track.requested_by_name, inline=True)
-            embed.add_field(name="Длительность", value=_format_duration(track.duration), inline=True)
-            if track.webpage_url:
-                embed.add_field(name="Ссылка", value=f"[Открыть трек]({track.webpage_url})", inline=False)
-            if track.thumbnail:
-                embed.set_thumbnail(url=track.thumbnail)
-        return embed
-
-    async def build_panel_embed(self, guild_id: int) -> discord.Embed:
-        settings = await self.get_settings(guild_id)
-        track = self.now_playing.get(guild_id)
-        queue_len = len(self.queues.get(guild_id, []))
-        embed = discord.Embed(title="🎶 Музыкальный пульт Пахабщины", color=discord.Color.purple())
-        if track:
-            embed.description = f"▶️ Сейчас играет:\n**{track.title}**"
-            embed.add_field(name="Заказал", value=track.requested_by_name, inline=True)
-            embed.add_field(name="Автор", value=track.uploader or "неизвестно", inline=True)
-            embed.add_field(name="Длительность", value=_format_duration(track.duration), inline=True)
-            if track.thumbnail:
-                embed.set_thumbnail(url=track.thumbnail)
-        else:
-            embed.description = "Сейчас ничего не играет. Нажми 🔎 и скорми мне песню."
-
-        guild = self.bot.get_guild(guild_id)
-        voice_client = guild.voice_client if guild else None
-        status = "ничего не играет"
-        if isinstance(voice_client, discord.VoiceClient):
-            if voice_client.is_paused():
-                status = "пауза"
-            elif voice_client.is_playing():
-                status = "играет"
-
-        embed.add_field(name="Статус", value=status, inline=True)
-        embed.add_field(name="Громкость", value=f"{int(settings.volume * 100)}%", inline=True)
-        embed.add_field(name="Loop", value="ON" if settings.loop else "OFF", inline=True)
-        embed.add_field(name="Shuffle", value="ON" if settings.shuffle else "OFF", inline=True)
-        embed.add_field(name="Очередь", value=f"{queue_len} треков", inline=True)
-        embed.set_footer(text="Вставь URL или название через кнопку 🔎")
-        return embed
-
-    async def update_panel(self, guild_id: int) -> None:
-        panel = self.panel_messages.get(guild_id)
-        if not panel:
-            return
-        channel_id, message_id = panel
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(channel_id)
-            except discord.HTTPException:
-                logger.exception("Failed to fetch music panel channel")
+    async def after_track(self, guild_id: int, error: Exception | None) -> None:
+        player = self.get_player(guild_id)
+        async with player.lock:
+            finished = player.current
+            player.is_paused = False
+            if player.stopped:
+                player.current = None
                 return
-        if not isinstance(channel, discord.TextChannel):
-            return
-        try:
-            message = await channel.fetch_message(message_id)
-            await message.edit(embed=await self.build_panel_embed(guild_id), view=MusicPanelView(self))
-        except discord.NotFound:
-            logger.warning("Music panel message is gone, clearing saved panel: guild=%s message=%s", guild_id, message_id)
-            await self.clear_saved_panel(guild_id)
-        except discord.HTTPException:
-            logger.exception("Failed to update music panel")
+            if player.queue:
+                await self.start_next_locked(player)
+                return
+            player.current = None
+            if player.autoplay_enabled and finished is not None:
+                added = await self.add_autoplay_track(player, finished)
+                if added:
+                    await self.start_next_locked(player)
+                else:
+                    player.autoplay_enabled = False
+                    logger.warning("Autoplay disabled after failed lookup: guild=%s", guild_id)
 
-    async def pause_resume_action(self, interaction: discord.Interaction) -> None:
-        if not await self.ensure_can_control(interaction):
+    async def shutdown_player(self, guild_id: int, *, disconnect: bool) -> None:
+        player = self.get_player(guild_id)
+        async with player.lock:
+            player.stopped = True
+            player.queue.clear()
+            player.current = None
+            player.is_paused = False
+            voice_client = player.voice_client
+            if isinstance(voice_client, discord.VoiceClient):
+                try:
+                    if voice_client.is_playing() or voice_client.is_paused():
+                        voice_client.stop()
+                    if disconnect and voice_client.is_connected():
+                        await voice_client.disconnect(force=False)
+                        logger.info("Music disconnected: guild=%s", guild_id)
+                except (discord.ClientException, discord.HTTPException):
+                    logger.exception("Music disconnect failed: guild=%s", guild_id)
+            if disconnect:
+                self.players.pop(guild_id, None)
+
+    def build_track_embed(self, title: str, track: Track, *, count: int = 1) -> discord.Embed:
+        description = f"**[{_short(track.title, 180)}]({track.webpage_url})**"
+        if count > 1:
+            description += f"\nДобавлено треков: **{count}**"
+        embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
+        embed.add_field(name="Длительность", value=_format_duration(track.duration), inline=True)
+        embed.add_field(name="Заказал", value=_short(track.requester_name, 80), inline=True)
+        if track.thumbnail:
+            embed.set_thumbnail(url=track.thumbnail)
+        return embed
+
+    def build_current_embed(self, player: MusicPlayer) -> discord.Embed:
+        track = player.current
+        if track is None:
+            return discord.Embed(title="Сейчас играет", description="Сейчас ничего не играет.", color=discord.Color.dark_grey())
+        status = "пауза" if player.is_paused else "играет"
+        embed = discord.Embed(
+            title="Сейчас играет",
+            description=f"**[{_short(track.title, 180)}]({track.webpage_url})**",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Статус", value=status, inline=True)
+        embed.add_field(name="Длительность", value=_format_duration(track.duration), inline=True)
+        embed.add_field(name="Заказал", value=_short(track.requester_name, 80), inline=True)
+        embed.add_field(name="Очередь", value=f"{len(player.queue)} треков", inline=True)
+        embed.add_field(name="Shuffle", value="включён" if player.shuffle_enabled else "выключен", inline=True)
+        embed.add_field(name="Автоплей", value="включён" if player.autoplay_enabled else "выключен", inline=True)
+        if track.thumbnail:
+            embed.set_thumbnail(url=track.thumbnail)
+        return embed
+
+    def build_queue_embed(self, player: MusicPlayer, *, page: int) -> discord.Embed:
+        total = len(player.queue)
+        embed = discord.Embed(title="Очередь", color=discord.Color.blurple())
+        if player.current:
+            embed.add_field(
+                name="Сейчас",
+                value=f"**[{_short(player.current.title, 120)}]({player.current.webpage_url})**",
+                inline=False,
+            )
+        if not player.queue:
+            embed.description = "Очередь пустая."
+            return embed
+
+        page = max(1, page)
+        start = (page - 1) * 10
+        end = min(start + 10, total)
+        if start >= total:
+            page = 1
+            start = 0
+            end = min(10, total)
+
+        lines: list[str] = []
+        for index, track in enumerate(player.queue[start:end], start + 1):
+            line = f"{index}. [{_short(track.title, 72)}]({track.webpage_url}) - {_short(track.requester_name, 32)}"
+            candidate = "\n".join([*lines, line])
+            if len(candidate) > MAX_QUEUE_PAGE_VALUE:
+                break
+            lines.append(line)
+
+        value = "\n".join(lines) if lines else "На этой странице нет треков."
+        embed.add_field(name=f"Треки {start + 1}-{end} из {total}", value=value[:1024], inline=False)
+        pages = max(1, (total + 9) // 10)
+        embed.set_footer(text=f"Страница {page}/{pages}. Используй page, чтобы открыть другую страницу.")
+        return embed
+
+    async def handle_add(
+        self,
+        guild: discord.Guild | None,
+        user: discord.Member | discord.User,
+        query: str,
+        *,
+        mode: str,
+        send_error: Any,
+        send_success: Any,
+    ) -> None:
+        clean_query = " ".join(str(query or "").split())
+        if not clean_query:
+            await send_error("Укажи YouTube-ссылку или название трека.")
             return
-        voice_client = interaction.guild.voice_client if interaction.guild else None
-        if not isinstance(voice_client, discord.VoiceClient):
-            await self.send_interaction_message(interaction, "Сейчас ничего не играет. Даже демоны молчат.", ephemeral=True)
+        if _is_http_url(clean_query) and not _is_safe_url(clean_query):
+            await send_error("Ссылка выглядит небезопасно. Принимаю только обычные http/https URL.")
             return
-        if voice_client.is_playing():
-            voice_client.pause()
-            await self.update_panel(interaction.guild.id)
-            await self.send_interaction_message(interaction, "⏸️ Поставил на паузу.", ephemeral=True)
-        elif voice_client.is_paused():
-            voice_client.resume()
-            await self.update_panel(interaction.guild.id)
-            await self.send_interaction_message(interaction, "▶️ Продолжаю.", ephemeral=True)
+        if not _is_http_url(clean_query) and ("://" in clean_query or "../" in clean_query or "..\\" in clean_query):
+            await send_error("Укажи обычную ссылку или название трека.")
+            return
+
+        voice_client = await self.ensure_voice(guild, user, send_error=send_error)
+        if voice_client is None or guild is None:
+            return
+
+        try:
+            tracks, playlist_detected = await self.extract_tracks(clean_query, user, allow_playlist=_is_http_url(clean_query))
+        except ExternalPlaylistNotConfigured as exc:
+            logger.info("External playlist rejected: guild=%s query=%s", guild.id, clean_query)
+            await send_error(str(exc))
+            return
+        except Exception:
+            logger.exception("yt-dlp failed: guild=%s query=%s", guild.id, clean_query)
+            await send_error("Не смог найти или разобрать трек. Проверь ссылку/название и попробуй ещё раз.")
+            return
+
+        if playlist_detected:
+            logger.info("YouTube playlist extracted: guild=%s count=%s", guild.id, len(tracks))
+        try:
+            result, first_track, count = await self.add_tracks(guild, voice_client, tracks, mode=mode)
+        except MusicUserError as exc:
+            await send_error(str(exc))
+            return
+        if first_track is None:
+            await send_error("Ничего не найдено.")
+            return
+
+        if result == "started":
+            embed_title = "Включаю"
+        elif mode == "now":
+            embed_title = "Включаю следующим"
+        elif mode == "next":
+            embed_title = "Добавлено следующим"
         else:
-            await self.send_interaction_message(interaction, "Сейчас ничего не играет. Даже демоны молчат.", ephemeral=True)
+            embed_title = "Добавлено в очередь"
+        await send_success(embed=self.build_track_embed(embed_title, first_track, count=count))
 
-    async def skip_action(self, interaction: discord.Interaction) -> None:
-        if not await self.ensure_can_control(interaction):
-            return
-        voice_client = interaction.guild.voice_client if interaction.guild else None
-        if not isinstance(voice_client, discord.VoiceClient) or not (voice_client.is_playing() or voice_client.is_paused()):
-            await self.send_interaction_message(interaction, "Скипать нечего. Музыкальная пустота смотрит в ответ.", ephemeral=True)
-            return
-        logger.info("Track skipped: guild=%s user=%s", interaction.guild.id, interaction.user.id)
-        voice_client.stop()
-        await self.send_interaction_message(interaction, "⏭️ Скипнул. Следующий грешник из очереди пошёл.", ephemeral=True)
+    async def handle_pause(self, guild: discord.Guild | None, user: discord.Member | discord.User, *, send_error: Any) -> str:
+        player = await self.ensure_can_control(guild, user, send_error=send_error)
+        if player is None or guild is None:
+            return ""
+        async with player.lock:
+            voice_client = guild.voice_client
+            if not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_playing():
+                await send_error("Сейчас нечего ставить на паузу.")
+                return ""
+            voice_client.pause()
+            player.is_paused = True
+            logger.info("Music paused: guild=%s user=%s", guild.id, user.id)
+            return "Пауза."
 
-    async def stop_action(self, interaction: discord.Interaction) -> None:
-        if not await self.ensure_can_control(interaction):
-            return
-        guild_id = interaction.guild.id
-        settings = await self.get_settings(guild_id)
-        settings.stopped = True
-        self.queues[guild_id] = []
-        self.now_playing.pop(guild_id, None)
-        voice_client = interaction.guild.voice_client
-        if isinstance(voice_client, discord.VoiceClient) and (voice_client.is_playing() or voice_client.is_paused()):
+    async def handle_resume(self, guild: discord.Guild | None, user: discord.Member | discord.User, *, send_error: Any) -> str:
+        player = await self.ensure_can_control(guild, user, send_error=send_error)
+        if player is None or guild is None:
+            return ""
+        async with player.lock:
+            voice_client = guild.voice_client
+            if not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_paused():
+                await send_error("Сейчас нет трека на паузе.")
+                return ""
+            voice_client.resume()
+            player.is_paused = False
+            logger.info("Music resumed: guild=%s user=%s", guild.id, user.id)
+            return "Продолжаю."
+
+    async def handle_skip(self, guild: discord.Guild | None, user: discord.Member | discord.User, *, send_error: Any) -> str:
+        player = await self.ensure_can_control(guild, user, send_error=send_error)
+        if player is None or guild is None:
+            return ""
+        async with player.lock:
+            voice_client = guild.voice_client
+            if not isinstance(voice_client, discord.VoiceClient) or not (voice_client.is_playing() or voice_client.is_paused()):
+                await send_error("Сейчас нечего пропускать.")
+                return ""
+            logger.info("Music skipped: guild=%s user=%s title=%s", guild.id, user.id, player.current.title if player.current else None)
             voice_client.stop()
-        logger.info("Music stopped: guild=%s user=%s", guild_id, interaction.user.id)
-        await self.update_panel(guild_id)
-        await self.send_interaction_message(interaction, "⏹️ Остановил музыку и сжёг очередь.", ephemeral=True)
+            return "Пропускаю текущий трек."
 
-    async def leave_action(self, interaction: discord.Interaction) -> None:
-        if not await self.ensure_can_control(interaction):
-            return
-        guild_id = interaction.guild.id
-        settings = await self.get_settings(guild_id)
-        settings.stopped = True
-        self.queues[guild_id] = []
-        self.now_playing.pop(guild_id, None)
-        voice_client = interaction.guild.voice_client
-        if isinstance(voice_client, discord.VoiceClient):
-            if voice_client.is_playing() or voice_client.is_paused():
+    async def handle_stop(self, guild: discord.Guild | None, user: discord.Member | discord.User, *, send_error: Any) -> str:
+        player = await self.ensure_can_control(guild, user, send_error=send_error)
+        if player is None or guild is None:
+            return ""
+        async with player.lock:
+            player.stopped = True
+            player.queue.clear()
+            player.current = None
+            player.is_paused = False
+            voice_client = guild.voice_client
+            if isinstance(voice_client, discord.VoiceClient) and (voice_client.is_playing() or voice_client.is_paused()):
                 voice_client.stop()
-            try:
-                await voice_client.disconnect(force=False)
-            except discord.HTTPException:
-                logger.exception("Voice disconnect failed")
-        logger.info("Music leave: guild=%s user=%s", guild_id, interaction.user.id)
-        await self.update_panel(guild_id)
-        await self.send_interaction_message(interaction, "👋 Ушёл из голосового. Не скучайте слишком громко.", ephemeral=True)
+            logger.info("Music stopped: guild=%s user=%s", guild.id, user.id)
+            return "Музыка остановлена, очередь очищена."
 
-    async def queue_action(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await self.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return
-        queue = self.queues.get(interaction.guild.id, [])
-        if not queue:
-            embed = discord.Embed(title="📜 Очередь", description="Очередь пустая. Музыкальная помойка молчит.", color=discord.Color.dark_grey())
-            await self.send_interaction_message(interaction, embed=embed, view=QueueControlView(self, interaction.guild.id), ephemeral=True)
-            return
-        lines = [f"{index}. **{_short(track.title, 70)}** — {track.requested_by_name}" for index, track in enumerate(queue[:10], 1)]
-        if len(queue) > 10:
-            lines.append(f"И ещё {len(queue) - 10} треков...")
-        embed = discord.Embed(title="📜 Очередь", description="\n".join(lines), color=discord.Color.blurple())
-        await self.send_interaction_message(interaction, embed=embed, view=QueueControlView(self, interaction.guild.id), ephemeral=True)
+    async def handle_clear(self, guild: discord.Guild | None, user: discord.Member | discord.User, *, send_error: Any) -> str:
+        player = await self.ensure_can_control(guild, user, send_error=send_error)
+        if player is None or guild is None:
+            return ""
+        async with player.lock:
+            count = len(player.queue)
+            player.queue.clear()
+            logger.info("Music queue cleared: guild=%s user=%s count=%s", guild.id, user.id, count)
+            return f"Очередь очищена. Убрано треков: {count}."
 
-    async def handle_volume_submit(self, interaction: discord.Interaction, raw_value: str) -> None:
-        if interaction.guild is None:
-            await self.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return
-        if not await self.ensure_can_control(interaction):
-            return
-        try:
-            value = int(str(raw_value).strip())
-        except ValueError:
-            await self.send_interaction_message(interaction, "Громкость должна быть числом от 0 до 100.", ephemeral=True)
-            return
-        if not 0 <= value <= 100:
-            await self.send_interaction_message(interaction, "Громкость должна быть числом от 0 до 100.", ephemeral=True)
-            return
+    async def handle_leave(self, guild: discord.Guild | None, user: discord.Member | discord.User, *, send_error: Any) -> str:
+        player = await self.ensure_can_control(guild, user, send_error=send_error)
+        if player is None or guild is None:
+            return ""
+        await self.shutdown_player(guild.id, disconnect=True)
+        logger.info("Music leave requested: guild=%s user=%s", guild.id, user.id)
+        return "Вышел из голосового канала."
 
-        settings = await self.get_settings(interaction.guild.id)
-        settings.volume = value / 100
-        voice_client = interaction.guild.voice_client
-        live_change = False
-        if isinstance(voice_client, discord.VoiceClient) and isinstance(voice_client.source, discord.PCMVolumeTransformer):
-            voice_client.source.volume = settings.volume
-            live_change = True
-        await self.save_settings(interaction.guild.id)
-        await self.update_panel(interaction.guild.id)
-        suffix = "" if live_change else " Применится со следующего трека."
-        await self.send_interaction_message(interaction, f"🔊 Громкость поставил на {value}%. Уши берегите сами.{suffix}", ephemeral=True)
+    async def handle_shuffle(
+        self,
+        guild: discord.Guild | None,
+        user: discord.Member | discord.User,
+        enabled: bool,
+        *,
+        send_error: Any,
+    ) -> str:
+        if guild is None:
+            await send_error("Команда доступна только на сервере.")
+            return ""
+        player = self.get_player(guild.id)
+        player.shuffle_enabled = enabled
+        logger.info("Music shuffle changed: guild=%s user=%s enabled=%s", guild.id, user.id, enabled)
+        return "Перемешивание включено." if enabled else "Перемешивание выключено."
 
-    async def loop_action(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await self.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return
-        if not await self.ensure_can_control(interaction):
-            return
-        settings = await self.get_settings(interaction.guild.id)
-        settings.loop = not settings.loop
-        await self.save_settings(interaction.guild.id)
-        await self.update_panel(interaction.guild.id)
-        text = "🔁 Loop включён. Этот трек теперь в цифровом аду." if settings.loop else "🔁 Loop выключен."
-        await self.send_interaction_message(interaction, text, ephemeral=True)
+    async def handle_autoplay(
+        self,
+        guild: discord.Guild | None,
+        user: discord.Member | discord.User,
+        enabled: bool,
+        *,
+        send_error: Any,
+    ) -> str:
+        if guild is None:
+            await send_error("Команда доступна только на сервере.")
+            return ""
+        player = self.get_player(guild.id)
+        if enabled and player.current is None and not player.queue:
+            await send_error("Для автоплея нужен текущий трек или хотя бы один трек в очереди.")
+            return ""
+        player.autoplay_enabled = enabled
+        logger.info("Music autoplay changed: guild=%s user=%s enabled=%s", guild.id, user.id, enabled)
+        return "Автоплей включён." if enabled else "Автоплей выключен."
 
-    async def shuffle_action(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await self.send_interaction_message(interaction, "Команда доступна только на сервере.", ephemeral=True)
-            return
-        if not await self.ensure_can_control(interaction):
-            return
-        settings = await self.get_settings(interaction.guild.id)
-        settings.shuffle = not settings.shuffle
-        await self.save_settings(interaction.guild.id)
-        await self.update_panel(interaction.guild.id)
-        text = "🔀 Shuffle включён. Очередь пошла по кривой дорожке." if settings.shuffle else "🔀 Shuffle выключен."
-        await self.send_interaction_message(interaction, text, ephemeral=True)
-
-    @music_group.command(name="panel", description="Отправить музыкальный пульт Пахабщины")
-    @app_commands.default_permissions(manage_guild=True)
+    @music_group.command(name="play", description="Добавить YouTube-ссылку или найденный по названию трек в очередь")
+    @app_commands.describe(query="YouTube URL, YouTube playlist или название трека")
     @app_commands.guild_only()
-    async def music_panel(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-            await interaction.response.send_message("Команда доступна только в текстовом канале сервера.", ephemeral=True)
-            return
-        if not _can_manage_music(interaction.user):
-            await interaction.response.send_message("Нужны права Administrator или Manage Server.", ephemeral=True)
-            return
-        logger.info("Creating music panel: guild=%s channel=%s", interaction.guild.id, interaction.channel.id)
-        embed = await self.build_panel_embed(interaction.guild.id)
-        await interaction.response.send_message(embed=embed, view=MusicPanelView(self))
-        message = await interaction.original_response()
-        self.panel_messages[interaction.guild.id] = (message.channel.id, message.id)
-        await self.save_settings(interaction.guild.id)
+    async def slash_play(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer(thinking=True)
+        await self.handle_add(
+            interaction.guild,
+            interaction.user,
+            query,
+            mode="end",
+            send_error=lambda text: interaction.followup.send(text, ephemeral=True),
+            send_success=lambda **kwargs: interaction.followup.send(**kwargs),
+        )
 
-    @music_group.command(name="play", description="Включить музыку по URL или поисковому запросу")
-    @app_commands.describe(query="URL или название песни")
+    @music_group.command(name="next", description="Добавить трек или плейлист следующим в очереди")
+    @app_commands.describe(query="YouTube URL, YouTube playlist или название трека")
     @app_commands.guild_only()
-    async def play(self, interaction: discord.Interaction, query: str) -> None:
-        await self.handle_query_interaction(interaction, query)
+    async def slash_next(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer(thinking=True)
+        await self.handle_add(
+            interaction.guild,
+            interaction.user,
+            query,
+            mode="next",
+            send_error=lambda text: interaction.followup.send(text, ephemeral=True),
+            send_success=lambda **kwargs: interaction.followup.send(**kwargs),
+        )
+
+    @music_group.command(name="now", description="Включить трек сразу, пропустив текущий")
+    @app_commands.describe(query="YouTube URL, YouTube playlist или название трека")
+    @app_commands.guild_only()
+    async def slash_now(self, interaction: discord.Interaction, query: str) -> None:
+        await interaction.response.defer(thinking=True)
+        await self.handle_add(
+            interaction.guild,
+            interaction.user,
+            query,
+            mode="now",
+            send_error=lambda text: interaction.followup.send(text, ephemeral=True),
+            send_success=lambda **kwargs: interaction.followup.send(**kwargs),
+        )
+
+    @music_group.command(name="pause", description="Поставить музыку на паузу")
+    @app_commands.guild_only()
+    async def slash_pause(self, interaction: discord.Interaction) -> None:
+        text = await self.handle_pause(interaction.guild, interaction.user, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
+
+    @music_group.command(name="resume", description="Продолжить музыку после паузы")
+    @app_commands.guild_only()
+    async def slash_resume(self, interaction: discord.Interaction) -> None:
+        text = await self.handle_resume(interaction.guild, interaction.user, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
 
     @music_group.command(name="skip", description="Пропустить текущий трек")
-    async def skip_command(self, interaction: discord.Interaction) -> None:
-        await self.skip_action(interaction)
+    @app_commands.guild_only()
+    async def slash_skip(self, interaction: discord.Interaction) -> None:
+        text = await self.handle_skip(interaction.guild, interaction.user, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
 
     @music_group.command(name="stop", description="Остановить музыку и очистить очередь")
-    async def stop_command(self, interaction: discord.Interaction) -> None:
-        await self.stop_action(interaction)
+    @app_commands.guild_only()
+    async def slash_stop(self, interaction: discord.Interaction) -> None:
+        text = await self.handle_stop(interaction.guild, interaction.user, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
 
     @music_group.command(name="leave", description="Отключить бота от голосового канала")
-    async def leave_command(self, interaction: discord.Interaction) -> None:
-        await self.leave_action(interaction)
+    @app_commands.guild_only()
+    async def slash_leave(self, interaction: discord.Interaction) -> None:
+        text = await self.handle_leave(interaction.guild, interaction.user, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
 
-    @music_group.command(name="queue", description="Показать музыкальную очередь")
-    async def queue_command(self, interaction: discord.Interaction) -> None:
-        await self.queue_action(interaction)
-
-    @music_group.command(name="nowplaying", description="Показать текущий трек")
-    async def nowplaying(self, interaction: discord.Interaction) -> None:
+    @music_group.command(name="queue", description="Показать очередь")
+    @app_commands.describe(page="Номер страницы очереди")
+    @app_commands.guild_only()
+    async def slash_queue(self, interaction: discord.Interaction, page: int = 1) -> None:
         if interaction.guild is None:
             await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
             return
-        track = self.now_playing.get(interaction.guild.id)
-        if not track:
-            await interaction.response.send_message("Сейчас ничего не играет. Даже демоны молчат.", ephemeral=True)
-            return
-        await interaction.response.send_message(embed=self.simple_embed("▶️ Сейчас играет", f"**{track.title}**", track))
+        player = self.get_player(interaction.guild.id)
+        await interaction.response.send_message(embed=self.build_queue_embed(player, page=page), ephemeral=True)
 
-    @music_group.command(name="volume", description="Поставить громкость музыки")
-    @app_commands.describe(value="Громкость 0-100")
-    async def volume_command(self, interaction: discord.Interaction, value: int) -> None:
-        await self.handle_volume_submit(interaction, str(value))
+    @music_group.command(name="current", description="Показать текущий трек")
+    @app_commands.guild_only()
+    async def slash_current(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=self.build_current_embed(self.get_player(interaction.guild.id)))
+
+    @music_group.command(name="clear", description="Очистить очередь, не отключая бота")
+    @app_commands.guild_only()
+    async def slash_clear(self, interaction: discord.Interaction) -> None:
+        text = await self.handle_clear(interaction.guild, interaction.user, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
+
+    @music_group.command(name="shuffle", description="Включить или выключить перемешивание очереди")
+    @app_commands.describe(enabled="Включить перемешивание")
+    @app_commands.guild_only()
+    async def slash_shuffle(self, interaction: discord.Interaction, enabled: bool) -> None:
+        text = await self.handle_shuffle(interaction.guild, interaction.user, enabled, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
+
+    @music_group.command(name="autoplay", description="Включить или выключить автодобавление похожих треков")
+    @app_commands.describe(enabled="Включить автоплей")
+    @app_commands.guild_only()
+    async def slash_autoplay(self, interaction: discord.Interaction, enabled: bool) -> None:
+        text = await self.handle_autoplay(interaction.guild, interaction.user, enabled, send_error=lambda message: self.send_interaction_message(interaction, message))
+        if text:
+            await self.send_interaction_message(interaction, text)
+
+    @commands.command(name="play", aliases=["играть"])
+    async def text_play(self, ctx: commands.Context[MovieBot], *, query: str) -> None:
+        await self.handle_add(
+            ctx.guild,
+            ctx.author,
+            query,
+            mode="end",
+            send_error=lambda text: self.send_context_message(ctx, text),
+            send_success=lambda **kwargs: self.send_context_message(ctx, **kwargs),
+        )
+
+    @commands.command(name="playnext", aliases=["next", "следующим"])
+    async def text_next(self, ctx: commands.Context[MovieBot], *, query: str) -> None:
+        await self.handle_add(
+            ctx.guild,
+            ctx.author,
+            query,
+            mode="next",
+            send_error=lambda text: self.send_context_message(ctx, text),
+            send_success=lambda **kwargs: self.send_context_message(ctx, **kwargs),
+        )
+
+    @commands.command(name="playnow", aliases=["now", "сейчас"])
+    async def text_now(self, ctx: commands.Context[MovieBot], *, query: str) -> None:
+        await self.handle_add(
+            ctx.guild,
+            ctx.author,
+            query,
+            mode="now",
+            send_error=lambda text: self.send_context_message(ctx, text),
+            send_success=lambda **kwargs: self.send_context_message(ctx, **kwargs),
+        )
+
+    @commands.command(name="pause", aliases=["пауза"])
+    async def text_pause(self, ctx: commands.Context[MovieBot]) -> None:
+        text = await self.handle_pause(ctx.guild, ctx.author, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.command(name="resume", aliases=["продолжить"])
+    async def text_resume(self, ctx: commands.Context[MovieBot]) -> None:
+        text = await self.handle_resume(ctx.guild, ctx.author, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.command(name="skip", aliases=["пропустить"])
+    async def text_skip(self, ctx: commands.Context[MovieBot]) -> None:
+        text = await self.handle_skip(ctx.guild, ctx.author, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.command(name="stop", aliases=["стоп"])
+    async def text_stop(self, ctx: commands.Context[MovieBot]) -> None:
+        text = await self.handle_stop(ctx.guild, ctx.author, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.command(name="leave", aliases=["выйти"])
+    async def text_leave(self, ctx: commands.Context[MovieBot]) -> None:
+        text = await self.handle_leave(ctx.guild, ctx.author, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.command(name="queue", aliases=["очередь"])
+    async def text_queue(self, ctx: commands.Context[MovieBot], page: int = 1) -> None:
+        if ctx.guild is None:
+            await self.send_context_message(ctx, "Команда доступна только на сервере.")
+            return
+        await self.send_context_message(ctx, embed=self.build_queue_embed(self.get_player(ctx.guild.id), page=page))
+
+    @commands.command(name="current", aliases=["nowplaying", "трек", "сейчас_играет"])
+    async def text_current(self, ctx: commands.Context[MovieBot]) -> None:
+        if ctx.guild is None:
+            await self.send_context_message(ctx, "Команда доступна только на сервере.")
+            return
+        await self.send_context_message(ctx, embed=self.build_current_embed(self.get_player(ctx.guild.id)))
+
+    @commands.command(name="clear", aliases=["очистить"])
+    async def text_clear(self, ctx: commands.Context[MovieBot]) -> None:
+        text = await self.handle_clear(ctx.guild, ctx.author, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.command(name="shuffle", aliases=["перемешать"])
+    async def text_shuffle(self, ctx: commands.Context[MovieBot], enabled: str | None = None) -> None:
+        if enabled is None:
+            if ctx.guild is None:
+                await self.send_context_message(ctx, "Команда доступна только на сервере.")
+                return
+            value = not self.get_player(ctx.guild.id).shuffle_enabled
+        else:
+            lowered = enabled.lower()
+            if lowered not in {"on", "off", "true", "false", "1", "0", "да", "нет", "вкл", "выкл"}:
+                await self.send_context_message(ctx, "Укажи on/off или да/нет.")
+                return
+            value = lowered in {"on", "true", "1", "да", "вкл"}
+        text = await self.handle_shuffle(ctx.guild, ctx.author, value, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.command(name="autoplay", aliases=["автоплей"])
+    async def text_autoplay(self, ctx: commands.Context[MovieBot], enabled: str | None = None) -> None:
+        if enabled is None:
+            if ctx.guild is None:
+                await self.send_context_message(ctx, "Команда доступна только на сервере.")
+                return
+            value = not self.get_player(ctx.guild.id).autoplay_enabled
+        else:
+            lowered = enabled.lower()
+            if lowered not in {"on", "off", "true", "false", "1", "0", "да", "нет", "вкл", "выкл"}:
+                await self.send_context_message(ctx, "Укажи on/off или да/нет.")
+                return
+            value = lowered in {"on", "true", "1", "да", "вкл"}
+        text = await self.handle_autoplay(ctx.guild, ctx.author, value, send_error=lambda message: self.send_context_message(ctx, message))
+        if text:
+            await self.send_context_message(ctx, text)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ) -> None:
+        bot_user = self.bot.user
+        if bot_user is None or member.id != bot_user.id:
+            return
+        if before.channel is not None and after.channel is None:
+            guild_id = member.guild.id
+            player = self.players.get(guild_id)
+            if player is not None:
+                async with player.lock:
+                    player.voice_client = None
+                    player.queue.clear()
+                    player.current = None
+                    player.is_paused = False
+                    player.stopped = True
+                logger.info("Music voice disconnected: guild=%s", guild_id)
 
 
 async def setup(bot: MovieBot) -> None:
-    cog = MusicCog(bot)
-    await cog.init_db()
-    await bot.add_cog(cog)
+    await bot.add_cog(MusicCog(bot))
