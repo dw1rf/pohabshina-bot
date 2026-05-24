@@ -58,7 +58,7 @@ ghcr.io/dw1rf/pohabshina-bot:pterodactyl-voice
 
 Стартовый файл проекта — `bot.py`. В Dockerfile он запускается как `python -u bot.py`; в Pterodactyl startup command должен быть тот же entrypoint, если сервер запускается не через `CMD` из Dockerfile.
 
-Если в логах остаётся ошибка `shutil.which('ffmpeg') returned nothing`, значит хостинг запустил не этот Dockerfile или контейнер не был пересобран. Пересоберите image с нуля и проверьте внутри контейнера:
+Если в логах остаётся ошибка `FFmpeg не найден в контейнере`, значит хостинг запустил не этот Dockerfile, контейнер не был пересобран или в контейнере нет исполняемого файла по стандартным путям. Пересоберите image с нуля и проверьте внутри контейнера:
 
 ```bash
 which ffmpeg
@@ -68,6 +68,8 @@ ffprobe -version
 which deno
 deno --version
 ```
+
+Если `ffmpeg` установлен в нестандартный путь, задайте переменную окружения `FFMPEG_EXECUTABLE`, например `FFMPEG_EXECUTABLE=/opt/bin/ffmpeg`. Для обычной Debian/Ubuntu-установки через `apt-get install ffmpeg` это не требуется: бот также проверяет `/usr/bin/ffmpeg`, `/usr/local/bin/ffmpeg` и `/bin/ffmpeg`.
 
 При успешном старте бот пишет в лог:
 
