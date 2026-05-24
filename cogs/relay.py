@@ -20,6 +20,7 @@ ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 EMBED_TOTAL_LIMIT = 6000
 TITLE_LIMIT = 256
 DESCRIPTION_LIMIT = 4096
+MODAL_TEXT_INPUT_LIMIT = 4000
 FOOTER_LIMIT = 2048
 
 
@@ -76,7 +77,7 @@ class SayEmbedModal(discord.ui.Modal, title="Отправить embed"):
         label="Основной текст",
         style=discord.TextStyle.paragraph,
         required=True,
-        max_length=DESCRIPTION_LIMIT,
+        max_length=MODAL_TEXT_INPUT_LIMIT,
         placeholder="Текст embed. Markdown и переносы строк сохраняются.",
     )
     color = discord.ui.TextInput(
@@ -133,7 +134,7 @@ class SayAfishaDetailsModal(discord.ui.Modal, title="Афиша: детали"):
         label="Описание",
         style=discord.TextStyle.paragraph,
         required=True,
-        max_length=DESCRIPTION_LIMIT,
+        max_length=MODAL_TEXT_INPUT_LIMIT,
     )
     image_url = discord.ui.TextInput(
         label="Ссылка на картинку",
