@@ -3,19 +3,50 @@ from __future__ import annotations
 import logging
 import os
 import platform
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 
 FFMPEG_MISSING_MESSAGE = "FFmpeg не найден в контейнере. Установите системный ffmpeg в Dockerfile/egg."
 
+FFMPEG_EXECUTABLE_ENV = "FFMPEG_EXECUTABLE"
+FFPROBE_EXECUTABLE_ENV = "FFPROBE_EXECUTABLE"
+FFMPEG_CANDIDATES = ("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/bin/ffmpeg")
+FFPROBE_CANDIDATES = ("/usr/bin/ffprobe", "/usr/local/bin/ffprobe", "/bin/ffprobe")
 
-def find_binary(name: str) -> str | None:
-    return shutil.which(name)
+
+def _is_executable_file(path: str) -> bool:
+    candidate = Path(path)
+    return candidate.is_file() and os.access(candidate, os.X_OK)
+
+
+def find_binary(name: str, *, env_var: str | None = None, candidates: tuple[str, ...] = ()) -> str | None:
+    if env_var:
+        configured = os.environ.get(env_var)
+        if configured:
+            if _is_executable_file(configured):
+                return configured
+            configured_path = shutil.which(configured)
+            if configured_path:
+                return configured_path
+
+    found = shutil.which(name)
+    if found:
+        return found
+
+    for candidate in candidates:
+        if _is_executable_file(candidate):
+            return candidate
+    return None
 
 
 def find_ffmpeg() -> str | None:
-    return find_binary("ffmpeg")
+    return find_binary("ffmpeg", env_var=FFMPEG_EXECUTABLE_ENV, candidates=FFMPEG_CANDIDATES)
+
+
+def find_ffprobe() -> str | None:
+    return find_binary("ffprobe", env_var=FFPROBE_EXECUTABLE_ENV, candidates=FFPROBE_CANDIDATES)
 
 
 def require_ffmpeg() -> str:
@@ -61,7 +92,7 @@ def log_voice_runtime(logger: logging.Logger) -> None:
             os.environ.get("PATH", ""),
         )
 
-    ffprobe_path = find_binary("ffprobe")
+    ffprobe_path = find_ffprobe()
     if ffprobe_path:
         log_binary_version(logger, "ffprobe", ffprobe_path, "-version")
     else:

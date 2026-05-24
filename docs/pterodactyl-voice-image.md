@@ -81,3 +81,5 @@ deno not found in PATH
 ```
 
 then Pterodactyl is still running the old egg image. Change the server/egg Docker Image to `ghcr.io/dw1rf/pohabshina-bot:pterodactyl-voice` and rebuild/redeploy.
+
+If the binary exists but is installed outside standard Linux paths, set `FFMPEG_EXECUTABLE` and optionally `FFPROBE_EXECUTABLE` to absolute paths. With the Debian `ffmpeg` apt package this should not be needed because the bot checks `PATH`, `/usr/bin`, `/usr/local/bin`, and `/bin`.
