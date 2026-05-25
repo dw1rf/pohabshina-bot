@@ -5,6 +5,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,17 +39,48 @@ YTDL_BASE_OPTIONS: dict[str, Any] = {
     "ignoreerrors": True,
 }
 YTDLP_COOKIE_FILE_ENV = "YTDLP_COOKIE_FILE"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _describe_cookie_file(cookie_file: str) -> str:
+    normalized = cookie_file.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", maxsplit=1)[-1] or "<empty>"
+
+
+def _resolve_cookie_file(cookie_file: str) -> str | None:
+    raw_path = Path(cookie_file).expanduser()
+    candidates = [raw_path]
+    if not raw_path.is_absolute():
+        candidates.append(PROJECT_ROOT / raw_path)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def _ytdl_options(**overrides: Any) -> dict[str, Any]:
     options = {**YTDL_BASE_OPTIONS, **overrides}
     cookie_file = os.getenv(YTDLP_COOKIE_FILE_ENV, "").strip()
     if cookie_file:
-        if os.path.isfile(cookie_file):
-            options["cookiefile"] = cookie_file
+        resolved_cookie_file = _resolve_cookie_file(cookie_file)
+        if resolved_cookie_file:
+            options["cookiefile"] = resolved_cookie_file
         else:
-            logger.warning("%s is set but file does not exist: %s", YTDLP_COOKIE_FILE_ENV, cookie_file)
+            logger.warning(
+                "%s is set but the cookie file is not readable inside the container: %s",
+                YTDLP_COOKIE_FILE_ENV,
+                _describe_cookie_file(cookie_file),
+            )
     return options
+
+
+def _ytdl_cookie_state(options: dict[str, Any]) -> str:
+    return "enabled" if options.get("cookiefile") else "disabled"
+
+
+def _is_ytdl_cookie_error(error: BaseException) -> bool:
+    return error.__class__.__name__ == "CookieLoadError" or "failed to load cookies" in str(error).lower()
 
 
 class MusicUserError(Exception):
@@ -56,6 +88,10 @@ class MusicUserError(Exception):
 
 
 class ExternalPlaylistNotConfigured(MusicUserError):
+    pass
+
+
+class InvalidYoutubeCookieFile(MusicUserError):
     pass
 
 
@@ -82,6 +118,140 @@ class MusicPlayer:
     autoplay_enabled: bool = False
     audio_player_task: asyncio.Task[None] | None = None
     stopped: bool = False
+
+
+class MusicAddTrackModal(discord.ui.Modal, title="Добавить музыку"):
+    query = discord.ui.TextInput(
+        label="YouTube ссылка или название",
+        placeholder="https://youtube.com/watch?v=... или название трека",
+        max_length=2000,
+    )
+
+    def __init__(self, cog: MusicCog, *, mode: str) -> None:
+        super().__init__()
+        self.cog = cog
+        self.mode = mode
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await self.cog.handle_add(
+            interaction.guild,
+            interaction.user,
+            str(self.query.value),
+            mode=self.mode,
+            send_error=lambda text: interaction.followup.send(text, ephemeral=True),
+            send_success=lambda **kwargs: interaction.followup.send(**kwargs, ephemeral=True),
+        )
+
+
+class MusicControlView(discord.ui.View):
+    def __init__(self, cog: MusicCog) -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    async def _send_ephemeral(self, interaction: discord.Interaction, content: str | None = None, *, embed: discord.Embed | None = None) -> None:
+        kwargs: dict[str, Any] = {"ephemeral": True, "allowed_mentions": discord.AllowedMentions.none()}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if interaction.response.is_done():
+            await interaction.followup.send(**kwargs)
+        else:
+            await interaction.response.send_message(**kwargs)
+
+    async def _refresh_panel_message(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or interaction.message is None:
+            return
+        try:
+            await interaction.message.edit(embed=self.cog.build_panel_embed(interaction.guild), view=self)
+        except discord.HTTPException:
+            logger.exception("Failed to refresh music panel: guild=%s", interaction.guild.id)
+
+    async def _run_action(self, interaction: discord.Interaction, action: Any) -> None:
+        await interaction.response.defer(ephemeral=True)
+        messages: list[str] = []
+
+        async def send_error(text: str) -> None:
+            messages.append(text)
+
+        text = await action(send_error)
+        if text:
+            messages.append(text)
+        await self._refresh_panel_message(interaction)
+        await interaction.followup.send("\n".join(messages) if messages else "Готово.", ephemeral=True)
+
+    @discord.ui.button(label="Добавить", style=discord.ButtonStyle.primary, custom_id="music_panel:add", row=0)
+    async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        await interaction.response.send_modal(MusicAddTrackModal(self.cog, mode="end"))
+
+    @discord.ui.button(label="Следующим", style=discord.ButtonStyle.secondary, custom_id="music_panel:next", row=0)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        await interaction.response.send_modal(MusicAddTrackModal(self.cog, mode="next"))
+
+    @discord.ui.button(label="Пауза/Продолжить", style=discord.ButtonStyle.secondary, custom_id="music_panel:pause_resume", row=0)
+    async def pause_resume_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        async def action(send_error: Any) -> str:
+            voice_client = interaction.guild.voice_client if interaction.guild is not None else None
+            if isinstance(voice_client, discord.VoiceClient) and voice_client.is_paused():
+                return await self.cog.handle_resume(interaction.guild, interaction.user, send_error=send_error)
+            return await self.cog.handle_pause(interaction.guild, interaction.user, send_error=send_error)
+
+        await self._run_action(interaction, action)
+
+    @discord.ui.button(label="Скип", style=discord.ButtonStyle.secondary, custom_id="music_panel:skip", row=0)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        await self._run_action(interaction, lambda send_error: self.cog.handle_skip(interaction.guild, interaction.user, send_error=send_error))
+
+    @discord.ui.button(label="Стоп", style=discord.ButtonStyle.danger, custom_id="music_panel:stop", row=0)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        await self._run_action(interaction, lambda send_error: self.cog.handle_stop(interaction.guild, interaction.user, send_error=send_error))
+
+    @discord.ui.button(label="Сейчас", style=discord.ButtonStyle.secondary, custom_id="music_panel:current", row=1)
+    async def current_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        if interaction.guild is None:
+            await self._send_ephemeral(interaction, "Команда доступна только на сервере.")
+            return
+        await self._send_ephemeral(interaction, embed=self.cog.build_current_embed(self.cog.get_player(interaction.guild.id)))
+
+    @discord.ui.button(label="Очередь", style=discord.ButtonStyle.secondary, custom_id="music_panel:queue", row=1)
+    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        if interaction.guild is None:
+            await self._send_ephemeral(interaction, "Команда доступна только на сервере.")
+            return
+        await self._send_ephemeral(interaction, embed=self.cog.build_queue_embed(self.cog.get_player(interaction.guild.id), page=1))
+
+    @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, custom_id="music_panel:shuffle", row=1)
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        async def action(send_error: Any) -> str:
+            if interaction.guild is None:
+                await send_error("Команда доступна только на сервере.")
+                return ""
+            player = self.cog.get_player(interaction.guild.id)
+            return await self.cog.handle_shuffle(interaction.guild, interaction.user, not player.shuffle_enabled, send_error=send_error)
+
+        await self._run_action(interaction, action)
+
+    @discord.ui.button(label="Autoplay", style=discord.ButtonStyle.secondary, custom_id="music_panel:autoplay", row=1)
+    async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        async def action(send_error: Any) -> str:
+            if interaction.guild is None:
+                await send_error("Команда доступна только на сервере.")
+                return ""
+            player = self.cog.get_player(interaction.guild.id)
+            return await self.cog.handle_autoplay(interaction.guild, interaction.user, not player.autoplay_enabled, send_error=send_error)
+
+        await self._run_action(interaction, action)
+
+    @discord.ui.button(label="Обновить", style=discord.ButtonStyle.secondary, custom_id="music_panel:refresh", row=1)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        await interaction.response.defer(ephemeral=True)
+        await self._refresh_panel_message(interaction)
+        await interaction.followup.send("Панель обновлена.", ephemeral=True)
+
+    @discord.ui.button(label="Выйти", style=discord.ButtonStyle.danger, custom_id="music_panel:leave", row=2)
+    async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
+        await self._run_action(interaction, lambda send_error: self.cog.handle_leave(interaction.guild, interaction.user, send_error=send_error))
 
 
 def _short(text: str | None, limit: int) -> str:
@@ -155,6 +325,7 @@ class MusicCog(commands.Cog):
         self.players: dict[int, MusicPlayer] = {}
         self._ffmpeg_executable: str | None = None
         self._ffmpeg_logged = False
+        self.bot.add_view(MusicControlView(self))
         ffmpeg_path = self.ffmpeg_executable()
         if ffmpeg_path:
             logger.info("Music cog found FFmpeg: %s", ffmpeg_path)
@@ -328,7 +499,10 @@ class MusicCog(commands.Cog):
             raise RuntimeError("yt-dlp is not installed")
         clean_query = " ".join(query.split())
         if _is_spotify_or_apple(clean_query):
-            raise ExternalPlaylistNotConfigured("Поддержка плейлистов Spotify/Apple пока не настроена.")
+            raise ExternalPlaylistNotConfigured(
+                "Spotify/Apple ссылки пока нельзя включить напрямую: в боте нет конвертера этих плейлистов в YouTube. "
+                "Пришлите YouTube-ссылку или название трека через кнопку «Добавить»."
+            )
 
         is_url = _is_http_url(clean_query)
         ytdl_query = clean_query if is_url else f"ytsearch1:{clean_query}"
@@ -336,13 +510,26 @@ class MusicCog(commands.Cog):
             noplaylist=not allow_playlist,
             playlistend=MAX_PLAYLIST_TRACKS,
         )
-        logger.info("yt-dlp extract: query=%s playlist=%s", clean_query, allow_playlist)
+        logger.info(
+            "yt-dlp extract: query=%s playlist=%s cookies=%s",
+            clean_query,
+            allow_playlist,
+            _ytdl_cookie_state(options),
+        )
 
         def extract() -> dict[str, Any] | None:
             with yt_dlp.YoutubeDL(options) as ytdl:
                 return ytdl.extract_info(ytdl_query, download=False)
 
-        data = await asyncio.to_thread(extract)
+        try:
+            data = await asyncio.to_thread(extract)
+        except Exception as exc:
+            if _is_ytdl_cookie_error(exc):
+                raise InvalidYoutubeCookieFile(
+                    "Файл cookies для YouTube найден, но yt-dlp не смог его прочитать. "
+                    "Экспортируйте cookies заново в Netscape format и замените youtube-cookies.txt."
+                ) from exc
+            raise
         if not isinstance(data, dict):
             return [], False
 
@@ -609,6 +796,29 @@ class MusicCog(commands.Cog):
         embed.set_footer(text=f"Страница {page}/{pages}. Используй page, чтобы открыть другую страницу.")
         return embed
 
+    def build_panel_embed(self, guild: discord.Guild) -> discord.Embed:
+        player = self.get_player(guild.id)
+        track = player.current
+        if track is None:
+            current = "Сейчас ничего не играет."
+        else:
+            status = "пауза" if player.is_paused else "играет"
+            current = f"[{_short(track.title, 120)}]({track.webpage_url}) ({status})"
+        voice_client = guild.voice_client
+        voice_status = "подключён" if isinstance(voice_client, discord.VoiceClient) and voice_client.is_connected() else "не подключён"
+        embed = discord.Embed(
+            title="Музыкальная панель",
+            description="Управление музыкой без спама в чате. Ответы на кнопки видит только нажавший.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Сейчас", value=current, inline=False)
+        embed.add_field(name="Очередь", value=f"{len(player.queue)} треков", inline=True)
+        embed.add_field(name="Голос", value=voice_status, inline=True)
+        embed.add_field(name="Shuffle", value="включён" if player.shuffle_enabled else "выключен", inline=True)
+        embed.add_field(name="Autoplay", value="включён" if player.autoplay_enabled else "выключен", inline=True)
+        embed.set_footer(text="Кнопка «Добавить» принимает YouTube-ссылку или название трека.")
+        return embed
+
     async def handle_add(
         self,
         guild: discord.Guild | None,
@@ -774,6 +984,14 @@ class MusicCog(commands.Cog):
         player.autoplay_enabled = enabled
         logger.info("Music autoplay changed: guild=%s user=%s enabled=%s", guild.id, user.id, enabled)
         return "Автоплей включён." if enabled else "Автоплей выключен."
+
+    @music_group.command(name="panel", description="Показать панель управления музыкой")
+    @app_commands.guild_only()
+    async def slash_panel(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=self.build_panel_embed(interaction.guild), view=MusicControlView(self))
 
     @music_group.command(name="play", description="Добавить YouTube-ссылку или найденный по названию трек в очередь")
     @app_commands.describe(query="YouTube URL, YouTube playlist или название трека")

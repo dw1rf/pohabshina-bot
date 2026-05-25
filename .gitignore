@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 venv/
 .vscode/
+cookies/
+youtube-cookies.txt
+*.cookies.txt
+scookies/youtube-cookies.txt
