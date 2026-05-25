@@ -5,6 +5,7 @@ from cogs.music import (
     _describe_cookie_file,
     _is_ytdl_cookie_error,
     _resolve_cookie_file,
+    _youtube_radio_url_as_single_track,
     _ytdl_cookie_state,
     _ytdl_options,
 )
@@ -55,3 +56,21 @@ def test_cookie_load_error_detection_uses_yt_dlp_error_shape() -> None:
     error = RuntimeError("failed to load cookies")
 
     assert _is_ytdl_cookie_error(error)
+
+
+def test_youtube_radio_url_is_forced_to_single_track() -> None:
+    url = "https://www.youtube.com/watch?v=XALLZHKnS_U&list=RDXALLZHKnS_U&start_radio=1"
+
+    normalized, forced_single = _youtube_radio_url_as_single_track(url)
+
+    assert forced_single is True
+    assert normalized == "https://www.youtube.com/watch?v=XALLZHKnS_U"
+
+
+def test_regular_youtube_playlist_is_not_forced_to_single_track() -> None:
+    url = "https://www.youtube.com/watch?v=abc123&list=PL1234567890"
+
+    normalized, forced_single = _youtube_radio_url_as_single_track(url)
+
+    assert forced_single is False
+    assert normalized == url

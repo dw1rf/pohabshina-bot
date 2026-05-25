@@ -7,7 +7,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import discord
 from discord import app_commands
@@ -285,6 +285,27 @@ def _is_safe_url(query: str) -> bool:
     return "../" not in lowered and "..\\" not in lowered
 
 
+def _youtube_radio_url_as_single_track(query: str) -> tuple[str, bool]:
+    try:
+        parsed = urlparse(query.strip())
+    except ValueError:
+        return query, False
+
+    host = parsed.netloc.lower().split("@")[-1].split(":")[0]
+    if not _host_matches(host, "youtube.com", "youtu.be", "youtube-nocookie.com"):
+        return query, False
+
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    list_values = [value for key, value in params if key == "list"]
+    is_radio = any(value.startswith("RD") for value in list_values) or any(key == "start_radio" for key, _ in params)
+    if not is_radio:
+        return query, False
+
+    filtered_params = [(key, value) for key, value in params if key not in {"list", "start_radio", "index"}]
+    normalized = urlunparse(parsed._replace(query=urlencode(filtered_params, doseq=True)))
+    return normalized, True
+
+
 def _host_matches(host: str, *suffixes: str) -> bool:
     return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
 
@@ -506,14 +527,20 @@ class MusicCog(commands.Cog):
 
         is_url = _is_http_url(clean_query)
         ytdl_query = clean_query if is_url else f"ytsearch1:{clean_query}"
+        effective_allow_playlist = allow_playlist
+        youtube_radio_as_single = False
+        if is_url:
+            ytdl_query, youtube_radio_as_single = _youtube_radio_url_as_single_track(clean_query)
+            if youtube_radio_as_single:
+                effective_allow_playlist = False
         options = _ytdl_options(
-            noplaylist=not allow_playlist,
+            noplaylist=not effective_allow_playlist,
             playlistend=MAX_PLAYLIST_TRACKS,
         )
         logger.info(
             "yt-dlp extract: query=%s playlist=%s cookies=%s",
             clean_query,
-            allow_playlist,
+            effective_allow_playlist,
             _ytdl_cookie_state(options),
         )
 
@@ -534,7 +561,7 @@ class MusicCog(commands.Cog):
             return [], False
 
         entries = data.get("entries")
-        playlist_detected = bool(entries) and is_url
+        playlist_detected = bool(entries) and is_url and not youtube_radio_as_single
         raw_items: list[dict[str, Any]] = []
         if entries:
             raw_items.extend(entry for entry in entries if isinstance(entry, dict))
