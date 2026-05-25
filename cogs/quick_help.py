@@ -210,4 +210,8 @@ class QuickHelpCog(commands.Cog):
 
 
 async def setup(bot: MovieBot) -> None:
-    await bot.add_cog(QuickHelpCog(bot))
+    cog = QuickHelpCog(bot)
+    if bot.tree.get_command("rules") is not None:
+        logger.info("Slash command /rules already exists; quick_help will keep the existing command and load /role, /how, /helpme.")
+        cog.__cog_app_commands__ = [command for command in cog.__cog_app_commands__ if command.name != "rules"]
+    await bot.add_cog(cog)
