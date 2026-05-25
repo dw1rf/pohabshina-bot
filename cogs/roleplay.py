@@ -36,22 +36,52 @@ class RoleplayCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self._target_cooldowns: dict[tuple[int, int, str], datetime] = {}
-        self._registered: list[str] = []
+        self._registered: set[tuple[int, str]] = set()
+        self._synced_guilds: set[int] = set()
+
+    async def cog_unload(self) -> None:
+        for guild_id, name in self._registered:
+            self.bot.tree.remove_command(name, guild=discord.Object(id=guild_id))
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        for guild in self.bot.guilds:
+            await self._ensure_guild_commands(guild)
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self._ensure_guild_commands(guild)
+
+    async def _ensure_guild_commands(self, guild: discord.Guild) -> None:
+        if guild.id in self._synced_guilds:
+            return
+
+        guild_object = discord.Object(id=guild.id)
+        added = 0
         for action_key, payload in RP_ACTIONS.items():
             name = COMMAND_NAME_OVERRIDES.get(action_key, action_key)
             if not _is_valid_command_name(name):
                 logger.warning("Skip invalid RP command name: %r", name)
                 continue
-            if self.bot.tree.get_command(name) is not None:
-                logger.warning("RP command /%s skipped because it already exists", name)
+            if self.bot.tree.get_command(name, guild=guild_object) is not None:
                 continue
-            command = app_commands.Command(name=name, description=f"RP-действие: {payload['label']}"[:100], callback=self._make_callback(action_key))
-            self.bot.tree.add_command(command)
-            self._registered.append(name)
+            command = app_commands.Command(
+                name=name,
+                description=f"RP-действие: {payload['label']}"[:100],
+                callback=self._make_callback(action_key),
+            )
+            self.bot.tree.add_command(command, guild=guild_object)
+            self._registered.add((guild.id, name))
+            added += 1
 
-    async def cog_unload(self) -> None:
-        for name in self._registered:
-            self.bot.tree.remove_command(name)
+        if added:
+            try:
+                await self.bot.tree.sync(guild=guild_object)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                logger.exception("Failed to sync RP guild commands: guild=%s added=%s", guild.id, added)
+                return
+        self._synced_guilds.add(guild.id)
+        logger.info("RP guild commands synced: guild=%s added=%s total=%s", guild.id, added, len(self._registered))
 
     def _make_callback(self, action_key: str):
         @app_commands.describe(target="Участник RP-сцены", comment="Необязательный короткий комментарий")
