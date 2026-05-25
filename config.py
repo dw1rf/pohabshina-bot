@@ -48,6 +48,13 @@ class Settings:
     support_admin_role_id: int
     support_log_channel_id: int
     shop_requests_to_support: bool
+    movie_rating_channel_id: int
+    afisha_channel_id: int
+    rules_channel_id: int
+    roles_channel_id: int
+    support_channel_id: int
+    shop_channel_id: int
+    ping_guard_delete_repeats: bool
     level_cooldown_seconds: int = 15
     min_message_length: int = 2
     max_level: int = 300
@@ -76,4 +83,11 @@ def load_settings() -> Settings:
         support_admin_role_id=int(os.getenv("SUPPORT_ADMIN_ROLE_ID", "0") or 0),
         support_log_channel_id=int(os.getenv("SUPPORT_LOG_CHANNEL_ID", "0") or 0),
         shop_requests_to_support=_parse_bool(os.getenv("SHOP_REQUESTS_TO_SUPPORT", "true"), default=True),
+        movie_rating_channel_id=int(os.getenv("MOVIE_RATING_CHANNEL_ID", "0") or 0),
+        afisha_channel_id=int(os.getenv("AFISHA_CHANNEL_ID", "0") or 0),
+        rules_channel_id=int(os.getenv("RULES_CHANNEL_ID", "0") or 0),
+        roles_channel_id=int(os.getenv("ROLES_CHANNEL_ID", "0") or 0),
+        support_channel_id=int(os.getenv("SUPPORT_CHANNEL_ID", "0") or 0),
+        shop_channel_id=int(os.getenv("SHOP_CHANNEL_ID", "0") or 0),
+        ping_guard_delete_repeats=_parse_bool(os.getenv("PING_GUARD_DELETE_REPEATS", "false")),
     )
