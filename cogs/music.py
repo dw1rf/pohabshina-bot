@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from dataclasses import dataclass, field
 from typing import Any
@@ -36,6 +37,18 @@ YTDL_BASE_OPTIONS: dict[str, Any] = {
     "extract_flat": False,
     "ignoreerrors": True,
 }
+YTDLP_COOKIE_FILE_ENV = "YTDLP_COOKIE_FILE"
+
+
+def _ytdl_options(**overrides: Any) -> dict[str, Any]:
+    options = {**YTDL_BASE_OPTIONS, **overrides}
+    cookie_file = os.getenv(YTDLP_COOKIE_FILE_ENV, "").strip()
+    if cookie_file:
+        if os.path.isfile(cookie_file):
+            options["cookiefile"] = cookie_file
+        else:
+            logger.warning("%s is set but file does not exist: %s", YTDLP_COOKIE_FILE_ENV, cookie_file)
+    return options
 
 
 class MusicUserError(Exception):
@@ -319,11 +332,10 @@ class MusicCog(commands.Cog):
 
         is_url = _is_http_url(clean_query)
         ytdl_query = clean_query if is_url else f"ytsearch1:{clean_query}"
-        options = {
-            **YTDL_BASE_OPTIONS,
-            "noplaylist": not allow_playlist,
-            "playlistend": MAX_PLAYLIST_TRACKS,
-        }
+        options = _ytdl_options(
+            noplaylist=not allow_playlist,
+            playlistend=MAX_PLAYLIST_TRACKS,
+        )
         logger.info("yt-dlp extract: query=%s playlist=%s", clean_query, allow_playlist)
 
         def extract() -> dict[str, Any] | None:
@@ -352,7 +364,7 @@ class MusicCog(commands.Cog):
     async def refresh_stream_url(self, track: Track) -> Track:
         if yt_dlp is None:
             raise RuntimeError("yt-dlp is not installed")
-        options = {**YTDL_BASE_OPTIONS, "noplaylist": True}
+        options = _ytdl_options(noplaylist=True)
 
         def extract() -> dict[str, Any] | None:
             with yt_dlp.YoutubeDL(options) as ytdl:
