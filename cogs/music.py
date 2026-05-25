@@ -40,6 +40,11 @@ YTDL_BASE_OPTIONS: dict[str, Any] = {
 YTDLP_COOKIE_FILE_ENV = "YTDLP_COOKIE_FILE"
 
 
+def _describe_cookie_file(cookie_file: str) -> str:
+    normalized = cookie_file.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", maxsplit=1)[-1] or "<empty>"
+
+
 def _ytdl_options(**overrides: Any) -> dict[str, Any]:
     options = {**YTDL_BASE_OPTIONS, **overrides}
     cookie_file = os.getenv(YTDLP_COOKIE_FILE_ENV, "").strip()
@@ -47,8 +52,16 @@ def _ytdl_options(**overrides: Any) -> dict[str, Any]:
         if os.path.isfile(cookie_file):
             options["cookiefile"] = cookie_file
         else:
-            logger.warning("%s is set but file does not exist: %s", YTDLP_COOKIE_FILE_ENV, cookie_file)
+            logger.warning(
+                "%s is set but the cookie file is not readable inside the container: %s",
+                YTDLP_COOKIE_FILE_ENV,
+                _describe_cookie_file(cookie_file),
+            )
     return options
+
+
+def _ytdl_cookie_state(options: dict[str, Any]) -> str:
+    return "enabled" if options.get("cookiefile") else "disabled"
 
 
 class MusicUserError(Exception):
@@ -336,7 +349,12 @@ class MusicCog(commands.Cog):
             noplaylist=not allow_playlist,
             playlistend=MAX_PLAYLIST_TRACKS,
         )
-        logger.info("yt-dlp extract: query=%s playlist=%s", clean_query, allow_playlist)
+        logger.info(
+            "yt-dlp extract: query=%s playlist=%s cookies=%s",
+            clean_query,
+            allow_playlist,
+            _ytdl_cookie_state(options),
+        )
 
         def extract() -> dict[str, Any] | None:
             with yt_dlp.YoutubeDL(options) as ytdl:
