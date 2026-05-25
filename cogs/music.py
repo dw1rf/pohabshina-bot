@@ -79,11 +79,19 @@ def _ytdl_cookie_state(options: dict[str, Any]) -> str:
     return "enabled" if options.get("cookiefile") else "disabled"
 
 
+def _is_ytdl_cookie_error(error: BaseException) -> bool:
+    return error.__class__.__name__ == "CookieLoadError" or "failed to load cookies" in str(error).lower()
+
+
 class MusicUserError(Exception):
     """A user-facing music error with a safe Russian message."""
 
 
 class ExternalPlaylistNotConfigured(MusicUserError):
+    pass
+
+
+class InvalidYoutubeCookieFile(MusicUserError):
     pass
 
 
@@ -375,7 +383,15 @@ class MusicCog(commands.Cog):
             with yt_dlp.YoutubeDL(options) as ytdl:
                 return ytdl.extract_info(ytdl_query, download=False)
 
-        data = await asyncio.to_thread(extract)
+        try:
+            data = await asyncio.to_thread(extract)
+        except Exception as exc:
+            if _is_ytdl_cookie_error(exc):
+                raise InvalidYoutubeCookieFile(
+                    "Файл cookies для YouTube найден, но yt-dlp не смог его прочитать. "
+                    "Экспортируйте cookies заново в Netscape format и замените youtube-cookies.txt."
+                ) from exc
+            raise
         if not isinstance(data, dict):
             return [], False
 
