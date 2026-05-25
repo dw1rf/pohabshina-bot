@@ -5,6 +5,7 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,6 +39,7 @@ YTDL_BASE_OPTIONS: dict[str, Any] = {
     "ignoreerrors": True,
 }
 YTDLP_COOKIE_FILE_ENV = "YTDLP_COOKIE_FILE"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _describe_cookie_file(cookie_file: str) -> str:
@@ -45,12 +47,25 @@ def _describe_cookie_file(cookie_file: str) -> str:
     return normalized.rsplit("/", maxsplit=1)[-1] or "<empty>"
 
 
+def _resolve_cookie_file(cookie_file: str) -> str | None:
+    raw_path = Path(cookie_file).expanduser()
+    candidates = [raw_path]
+    if not raw_path.is_absolute():
+        candidates.append(PROJECT_ROOT / raw_path)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def _ytdl_options(**overrides: Any) -> dict[str, Any]:
     options = {**YTDL_BASE_OPTIONS, **overrides}
     cookie_file = os.getenv(YTDLP_COOKIE_FILE_ENV, "").strip()
     if cookie_file:
-        if os.path.isfile(cookie_file):
-            options["cookiefile"] = cookie_file
+        resolved_cookie_file = _resolve_cookie_file(cookie_file)
+        if resolved_cookie_file:
+            options["cookiefile"] = resolved_cookie_file
         else:
             logger.warning(
                 "%s is set but the cookie file is not readable inside the container: %s",
