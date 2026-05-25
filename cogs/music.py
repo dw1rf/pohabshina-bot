@@ -14,6 +14,11 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from cogs.music_resolvers import (
+    ResolverUserError,
+    is_external_music_query,
+    resolve_external_music_query,
+)
 from utils.voice_runtime import FFMPEG_MISSING_MESSAGE, find_ffmpeg, log_binary_version, require_ffmpeg
 
 try:
@@ -23,10 +28,17 @@ except ImportError:  # pragma: no cover - handled at runtime for clearer Discord
 
 logger = logging.getLogger(__name__)
 
-FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+FFMPEG_BEFORE_OPTIONS = (
+    "-reconnect 1 "
+    "-reconnect_streamed 1 "
+    "-reconnect_delay_max 5 "
+    "-reconnect_on_network_error 1 "
+    "-reconnect_on_http_error 4xx,5xx"
+)
 FFMPEG_OPTIONS = "-vn"
 MAX_QUEUE_PAGE_VALUE = 950
-MAX_PLAYLIST_TRACKS = 100
+MAX_PLAYLIST_TRACKS = int(os.getenv("MUSIC_MAX_PLAYLIST_TRACKS", "50") or "50")
+YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("MUSIC_EXTRACT_TIMEOUT_SECONDS", "60") or "60")
 URL_PREFIXES = ("http://", "https://")
 
 YTDL_BASE_OPTIONS: dict[str, Any] = {
@@ -40,6 +52,7 @@ YTDL_BASE_OPTIONS: dict[str, Any] = {
 }
 YTDLP_COOKIE_FILE_ENV = "YTDLP_COOKIE_FILE"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_cookie_warning_logged = False
 
 
 def _describe_cookie_file(cookie_file: str) -> str:
@@ -52,11 +65,33 @@ def _resolve_cookie_file(cookie_file: str) -> str | None:
     candidates = [raw_path]
     if not raw_path.is_absolute():
         candidates.append(PROJECT_ROOT / raw_path)
+        candidates.append(Path("/app") / raw_path)
 
     for candidate in candidates:
-        if candidate.is_file():
+        if candidate.is_file() and os.access(candidate, os.R_OK):
             return str(candidate)
     return None
+
+
+def _log_cookie_warning_once(cookie_file: str) -> None:
+    global _cookie_warning_logged
+    if _cookie_warning_logged:
+        return
+    _cookie_warning_logged = True
+    logger.warning(
+        "%s is set but the cookie file is not readable inside the container: %s. "
+        "yt-dlp will run with cookies=disabled. For Docker Compose mount it as "
+        "./youtube-cookies.txt:/app/youtube-cookies.txt:ro and set %s=/app/youtube-cookies.txt.",
+        YTDLP_COOKIE_FILE_ENV,
+        _describe_cookie_file(cookie_file),
+        YTDLP_COOKIE_FILE_ENV,
+    )
+
+
+def _validate_ytdl_cookie_file() -> None:
+    cookie_file = os.getenv(YTDLP_COOKIE_FILE_ENV, "").strip()
+    if cookie_file and _resolve_cookie_file(cookie_file) is None:
+        _log_cookie_warning_once(cookie_file)
 
 
 def _ytdl_options(**overrides: Any) -> dict[str, Any]:
@@ -67,11 +102,7 @@ def _ytdl_options(**overrides: Any) -> dict[str, Any]:
         if resolved_cookie_file:
             options["cookiefile"] = resolved_cookie_file
         else:
-            logger.warning(
-                "%s is set but the cookie file is not readable inside the container: %s",
-                YTDLP_COOKIE_FILE_ENV,
-                _describe_cookie_file(cookie_file),
-            )
+            _log_cookie_warning_once(cookie_file)
     return options
 
 
@@ -103,6 +134,9 @@ class Track:
     duration: int | None
     requester_id: int
     requester_name: str
+    artist: str | None = None
+    source: str = "youtube"
+    original_url: str | None = None
     thumbnail: str | None = None
 
 
@@ -133,14 +167,14 @@ class MusicAddTrackModal(discord.ui.Modal, title="Добавить музыку"
         self.mode = mode
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer(ephemeral=False, thinking=True)
         await self.cog.handle_add(
             interaction.guild,
             interaction.user,
             str(self.query.value),
             mode=self.mode,
             send_error=lambda text: interaction.followup.send(text, ephemeral=True),
-            send_success=lambda **kwargs: interaction.followup.send(**kwargs, ephemeral=True),
+            send_success=lambda **kwargs: interaction.followup.send(**kwargs),
         )
 
 
@@ -148,6 +182,54 @@ class MusicControlView(discord.ui.View):
     def __init__(self, cog: MusicCog) -> None:
         super().__init__(timeout=None)
         self.cog = cog
+        button_config: dict[str, tuple[str, str, discord.ButtonStyle, int]] = {
+            "music_panel:pause_resume": ("Пауза", "⏯️", discord.ButtonStyle.secondary, 0),
+            "music_panel:skip": ("Пропуск", "⏭️", discord.ButtonStyle.secondary, 0),
+            "music_panel:stop": ("Стоп", "⏹️", discord.ButtonStyle.danger, 0),
+            "music_panel:leave": ("Выйти", "👋", discord.ButtonStyle.danger, 0),
+            "music_panel:add": ("Добавить", "➕", discord.ButtonStyle.primary, 1),
+            "music_panel:next": ("Следующим", "⏫", discord.ButtonStyle.secondary, 1),
+            "music_panel:queue": ("Очередь", "📜", discord.ButtonStyle.secondary, 1),
+            "music_panel:shuffle": ("Микс", "🔀", discord.ButtonStyle.secondary, 1),
+            "music_panel:current": ("Сейчас", "ℹ️", discord.ButtonStyle.secondary, 2),
+            "music_panel:autoplay": ("Авто", "🔁", discord.ButtonStyle.secondary, 2),
+            "music_panel:refresh": ("Обновить", "🔄", discord.ButtonStyle.secondary, 2),
+        }
+        for item in self.children:
+            if isinstance(item, discord.ui.Button) and item.custom_id in button_config:
+                label, emoji, style, row = button_config[item.custom_id]
+                item.label = label
+                item.emoji = emoji
+                item.style = style
+                item.row = row
+        for item in list(self.children):
+            if isinstance(item, discord.ui.Button) and item.custom_id == "music_panel:refresh":
+                self.remove_item(item)
+        clear_button = discord.ui.Button(label="Очистить", emoji="🧹", style=discord.ButtonStyle.secondary, custom_id="music_panel:clear", row=1)
+        clear_button.callback = self.clear_button_callback
+        self.add_item(clear_button)
+
+    async def clear_button_callback(self, interaction: discord.Interaction) -> None:
+        await self._run_action(interaction, lambda send_error: self.cog.handle_clear(interaction.guild, interaction.user, send_error=send_error))
+
+    async def _safe_defer(self, interaction: discord.Interaction, *, ephemeral: bool = True) -> bool:
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=ephemeral)
+            return True
+        except discord.NotFound:
+            logger.warning("Music panel interaction expired before defer: guild=%s", interaction.guild_id)
+            return False
+        except discord.InteractionResponded:
+            return True
+
+    async def _safe_send_modal(self, interaction: discord.Interaction, modal: discord.ui.Modal) -> None:
+        try:
+            await interaction.response.send_modal(modal)
+        except discord.NotFound:
+            logger.warning("Music panel interaction expired before modal: guild=%s", interaction.guild_id)
+        except discord.InteractionResponded:
+            logger.debug("Music panel modal skipped because interaction was already answered: guild=%s", interaction.guild_id)
 
     async def _send_ephemeral(self, interaction: discord.Interaction, content: str | None = None, *, embed: discord.Embed | None = None) -> None:
         kwargs: dict[str, Any] = {"ephemeral": True, "allowed_mentions": discord.AllowedMentions.none()}
@@ -155,10 +237,15 @@ class MusicControlView(discord.ui.View):
             kwargs["content"] = content
         if embed is not None:
             kwargs["embed"] = embed
-        if interaction.response.is_done():
-            await interaction.followup.send(**kwargs)
-        else:
-            await interaction.response.send_message(**kwargs)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(**kwargs)
+            else:
+                await interaction.response.send_message(**kwargs)
+        except discord.NotFound:
+            logger.warning("Music panel interaction expired before message: guild=%s", interaction.guild_id)
+        except discord.InteractionResponded:
+            logger.debug("Music panel interaction already answered: guild=%s", interaction.guild_id)
 
     async def _refresh_panel_message(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or interaction.message is None:
@@ -169,7 +256,8 @@ class MusicControlView(discord.ui.View):
             logger.exception("Failed to refresh music panel: guild=%s", interaction.guild.id)
 
     async def _run_action(self, interaction: discord.Interaction, action: Any) -> None:
-        await interaction.response.defer(ephemeral=True)
+        if not await self._safe_defer(interaction, ephemeral=True):
+            return
         messages: list[str] = []
 
         async def send_error(text: str) -> None:
@@ -179,15 +267,18 @@ class MusicControlView(discord.ui.View):
         if text:
             messages.append(text)
         await self._refresh_panel_message(interaction)
-        await interaction.followup.send("\n".join(messages) if messages else "Готово.", ephemeral=True)
+        try:
+            await interaction.followup.send("\n".join(messages) if messages else "Готово.", ephemeral=True)
+        except discord.NotFound:
+            logger.warning("Music panel followup expired: guild=%s", interaction.guild_id)
 
     @discord.ui.button(label="Добавить", style=discord.ButtonStyle.primary, custom_id="music_panel:add", row=0)
     async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await interaction.response.send_modal(MusicAddTrackModal(self.cog, mode="end"))
+        await self._safe_send_modal(interaction, MusicAddTrackModal(self.cog, mode="end"))
 
     @discord.ui.button(label="Следующим", style=discord.ButtonStyle.secondary, custom_id="music_panel:next", row=0)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await interaction.response.send_modal(MusicAddTrackModal(self.cog, mode="next"))
+        await self._safe_send_modal(interaction, MusicAddTrackModal(self.cog, mode="next"))
 
     @discord.ui.button(label="Пауза/Продолжить", style=discord.ButtonStyle.secondary, custom_id="music_panel:pause_resume", row=0)
     async def pause_resume_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
@@ -245,7 +336,8 @@ class MusicControlView(discord.ui.View):
 
     @discord.ui.button(label="Обновить", style=discord.ButtonStyle.secondary, custom_id="music_panel:refresh", row=1)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await interaction.response.defer(ephemeral=True)
+        if not await self._safe_defer(interaction, ephemeral=True):
+            return
         await self._refresh_panel_message(interaction)
         await interaction.followup.send("Панель обновлена.", ephemeral=True)
 
@@ -310,15 +402,28 @@ def _host_matches(host: str, *suffixes: str) -> bool:
     return any(host == suffix or host.endswith(f".{suffix}") for suffix in suffixes)
 
 
+def _source_label(source: str) -> str:
+    return {
+        "youtube": "YouTube",
+        "spotify": "Spotify",
+        "yandex": "Яндекс Музыка",
+        "search": "Поиск",
+    }.get(source, source.title())
+
+
 def _is_spotify_or_apple(query: str) -> bool:
-    try:
-        host = urlparse(query).netloc.lower()
-    except ValueError:
-        return False
-    return _host_matches(host, "spotify.com", "music.apple.com")
+    return False
 
 
-def _track_from_info(info: dict[str, Any], requester: discord.Member | discord.User) -> Track | None:
+def _track_from_info(
+    info: dict[str, Any],
+    requester: discord.Member | discord.User,
+    *,
+    source: str = "youtube",
+    original_url: str | None = None,
+    artist: str | None = None,
+    thumbnail: str | None = None,
+) -> Track | None:
     title = info.get("title") or "Без названия"
     webpage_url = info.get("webpage_url") or info.get("original_url")
     if not webpage_url and info.get("id"):
@@ -334,7 +439,10 @@ def _track_from_info(info: dict[str, Any], requester: discord.Member | discord.U
         duration=info.get("duration"),
         requester_id=requester.id,
         requester_name=requester_name,
-        thumbnail=info.get("thumbnail"),
+        artist=artist,
+        source=source,
+        original_url=original_url or webpage_url,
+        thumbnail=thumbnail or info.get("thumbnail"),
     )
 
 
@@ -346,6 +454,7 @@ class MusicCog(commands.Cog):
         self.players: dict[int, MusicPlayer] = {}
         self._ffmpeg_executable: str | None = None
         self._ffmpeg_logged = False
+        _validate_ytdl_cookie_file()
         self.bot.add_view(MusicControlView(self))
         ffmpeg_path = self.ffmpeg_executable()
         if ffmpeg_path:
@@ -519,6 +628,8 @@ class MusicCog(commands.Cog):
         if yt_dlp is None:
             raise RuntimeError("yt-dlp is not installed")
         clean_query = " ".join(query.split())
+        if is_external_music_query(clean_query):
+            return await self.extract_external_tracks(clean_query, requester)
         if _is_spotify_or_apple(clean_query):
             raise ExternalPlaylistNotConfigured(
                 "Spotify/Apple ссылки пока нельзя включить напрямую: в боте нет конвертера этих плейлистов в YouTube. "
@@ -549,7 +660,7 @@ class MusicCog(commands.Cog):
                 return ytdl.extract_info(ytdl_query, download=False)
 
         try:
-            data = await asyncio.to_thread(extract)
+            data = await asyncio.wait_for(asyncio.to_thread(extract), timeout=YTDL_EXTRACT_TIMEOUT_SECONDS)
         except Exception as exc:
             if _is_ytdl_cookie_error(exc):
                 raise InvalidYoutubeCookieFile(
@@ -570,10 +681,74 @@ class MusicCog(commands.Cog):
 
         tracks: list[Track] = []
         for item in raw_items[:MAX_PLAYLIST_TRACKS]:
-            track = _track_from_info(item, requester)
+            track = _track_from_info(item, requester, source="youtube" if is_url else "search", original_url=clean_query)
             if track is not None:
                 tracks.append(track)
         return tracks, playlist_detected
+
+    async def extract_external_tracks(
+        self,
+        query: str,
+        requester: discord.Member | discord.User,
+    ) -> tuple[list[Track], bool]:
+        resolved = await asyncio.wait_for(
+            asyncio.to_thread(resolve_external_music_query, query, max_tracks=MAX_PLAYLIST_TRACKS),
+            timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
+        )
+        options = _ytdl_options(noplaylist=True)
+        tracks: list[Track] = []
+        skipped = resolved.skipped
+
+        for resolved_track in resolved.tracks[:MAX_PLAYLIST_TRACKS]:
+            ytdl_query = f"ytsearch1:{resolved_track.search_query}"
+
+            def extract() -> dict[str, Any] | None:
+                with yt_dlp.YoutubeDL(options) as ytdl:
+                    return ytdl.extract_info(ytdl_query, download=False)
+
+            try:
+                data = await asyncio.wait_for(asyncio.to_thread(extract), timeout=YTDL_EXTRACT_TIMEOUT_SECONDS)
+            except Exception:
+                skipped += 1
+                logger.warning(
+                    "External track lookup failed: source=%s query=%s",
+                    resolved_track.source,
+                    resolved_track.search_query,
+                    exc_info=True,
+                )
+                continue
+
+            entries = data.get("entries") if isinstance(data, dict) else None
+            item = next((entry for entry in entries if isinstance(entry, dict)), None) if entries else data
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+
+            track = _track_from_info(
+                item,
+                requester,
+                source=resolved_track.source,
+                original_url=resolved_track.original_url,
+                artist=resolved_track.artist,
+                thumbnail=resolved_track.thumbnail,
+            )
+            if track is None:
+                skipped += 1
+                continue
+            track.title = resolved_track.title
+            if resolved_track.duration and not track.duration:
+                track.duration = resolved_track.duration
+            tracks.append(track)
+
+        if skipped:
+            logger.info(
+                "External music resolved with skipped tracks: source=%s added=%s skipped=%s limit=%s",
+                resolved.source,
+                len(tracks),
+                skipped,
+                resolved.limit,
+            )
+        return tracks, resolved.playlist_detected
 
     async def refresh_stream_url(self, track: Track) -> Track:
         if yt_dlp is None:
@@ -584,7 +759,7 @@ class MusicCog(commands.Cog):
             with yt_dlp.YoutubeDL(options) as ytdl:
                 return ytdl.extract_info(track.webpage_url, download=False)
 
-        data = await asyncio.to_thread(extract)
+        data = await asyncio.wait_for(asyncio.to_thread(extract), timeout=YTDL_EXTRACT_TIMEOUT_SECONDS)
         if not isinstance(data, dict):
             raise RuntimeError("yt-dlp returned no track info")
         refreshed = _track_from_info(
@@ -595,6 +770,10 @@ class MusicCog(commands.Cog):
             raise RuntimeError("yt-dlp returned no playable stream")
         refreshed.requester_id = track.requester_id
         refreshed.requester_name = track.requester_name
+        refreshed.artist = track.artist
+        refreshed.source = track.source
+        refreshed.original_url = track.original_url
+        refreshed.thumbnail = track.thumbnail or refreshed.thumbnail
         return refreshed
 
     async def add_autoplay_track(self, player: MusicPlayer, previous: Track) -> bool:
@@ -749,9 +928,11 @@ class MusicCog(commands.Cog):
                 try:
                     if voice_client.is_playing() or voice_client.is_paused():
                         voice_client.stop()
-                    if disconnect and voice_client.is_connected():
+                    if disconnect and voice_client.is_connected() and not self._tts_session_active(guild_id):
                         await voice_client.disconnect(force=False)
                         logger.info("Music disconnected: guild=%s", guild_id)
+                    elif disconnect and self._tts_session_active(guild_id):
+                        logger.info("Music shutdown kept shared voice client for active TTS: guild=%s", guild_id)
                 except (discord.ClientException, discord.HTTPException):
                     logger.exception("Music disconnect failed: guild=%s", guild_id)
             if disconnect:
@@ -762,6 +943,9 @@ class MusicCog(commands.Cog):
         if count > 1:
             description += f"\nДобавлено треков: **{count}**"
         embed = discord.Embed(title=title, description=description, color=discord.Color.blurple())
+        if track.artist:
+            embed.add_field(name="Исполнитель", value=_short(track.artist, 80), inline=True)
+        embed.add_field(name="Источник", value=_source_label(track.source), inline=True)
         embed.add_field(name="Длительность", value=_format_duration(track.duration), inline=True)
         embed.add_field(name="Заказал", value=_short(track.requester_name, 80), inline=True)
         if track.thumbnail:
@@ -770,6 +954,9 @@ class MusicCog(commands.Cog):
 
     def build_current_embed(self, player: MusicPlayer) -> discord.Embed:
         track = player.current
+        source = "Ожидание"
+        requester = "-"
+        duration = "-"
         if track is None:
             return discord.Embed(title="Сейчас играет", description="Сейчас ничего не играет.", color=discord.Color.dark_grey())
         status = "пауза" if player.is_paused else "играет"
@@ -828,24 +1015,35 @@ class MusicCog(commands.Cog):
         track = player.current
         if track is None:
             current = "Сейчас ничего не играет."
+            source = "Ожидание"
+            requester = "-"
+            duration = "-"
+            status = "ожидание"
         else:
             status = "пауза" if player.is_paused else "играет"
-            current = f"[{_short(track.title, 120)}]({track.webpage_url}) ({status})"
+            current = f"[{_short(track.title, 120)}]({track.webpage_url})"
+            source = _source_label(track.source)
+            requester = _short(track.requester_name, 80)
+            duration = _format_duration(track.duration)
         voice_client = guild.voice_client
         voice_status = "подключён" if isinstance(voice_client, discord.VoiceClient) and voice_client.is_connected() else "не подключён"
         embed = discord.Embed(
-            title="Музыкальная панель",
-            description="Управление музыкой без спама в чате. Ответы на кнопки видит только нажавший.",
+            title="🎵 Музыкальная панель",
+            description="Публичная панель управления текущей музыкой.",
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="Сейчас", value=current, inline=False)
+        embed.add_field(name="Текущий трек", value=current, inline=False)
+        embed.add_field(name="Статус", value=status, inline=True)
+        embed.add_field(name="Источник", value=source, inline=True)
+        embed.add_field(name="Добавил", value=requester, inline=True)
+        embed.add_field(name="Длительность", value=duration, inline=True)
         embed.add_field(name="Очередь", value=f"{len(player.queue)} треков", inline=True)
         embed.add_field(name="Голос", value=voice_status, inline=True)
         embed.add_field(name="Shuffle", value="включён" if player.shuffle_enabled else "выключен", inline=True)
-        embed.add_field(name="Autoplay", value="включён" if player.autoplay_enabled else "выключен", inline=True)
-        embed.set_footer(text="Кнопка «Добавить» принимает YouTube-ссылку или название трека.")
+        embed.add_field(name="Авто", value="включено" if player.autoplay_enabled else "выключено", inline=True)
+        if track and track.thumbnail:
+            embed.set_thumbnail(url=track.thumbnail)
         return embed
-
     async def handle_add(
         self,
         guild: discord.Guild | None,
@@ -873,7 +1071,7 @@ class MusicCog(commands.Cog):
 
         try:
             tracks, playlist_detected = await self.extract_tracks(clean_query, user, allow_playlist=_is_http_url(clean_query))
-        except ExternalPlaylistNotConfigured as exc:
+        except (ExternalPlaylistNotConfigured, ResolverUserError) as exc:
             logger.info("External playlist rejected: guild=%s query=%s", guild.id, clean_query)
             await send_error(str(exc))
             return
