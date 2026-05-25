@@ -93,6 +93,8 @@ RU_COMMAND_NAMES: dict[str, str] = {
     "story": "история",
     "support_panel": "поддержка",
     "top": "топ",
+    "tts": "озвучка",
+    "tts_say": "сказать_голосом",
     "unban": "разбан",
     "unmute": "размут",
     "volume": "громкость",
