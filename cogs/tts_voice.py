@@ -28,6 +28,8 @@ IDLE_TIMEOUT_SECONDS = 10 * 60
 MESSAGE_COOLDOWN_SECONDS = 1.5
 MAX_QUEUE_SIZE = 10
 MAX_TTS_PART_LENGTH = 200
+MAX_TTS_PARTS_PER_MESSAGE = 5
+TTS_SYNTH_RETRIES = 3
 DEFAULT_VOICE = "ru-RU-SvetlanaNeural"
 COMMAND_PREFIXES = ("/", "!", ".", "?", "+", "-")
 
@@ -66,6 +68,7 @@ class TTSSession:
     panel_message_id: int | None = None
     tmp_files: set[Path] = field(default_factory=set)
     active: bool = True
+    synth_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _voice_label(voice: str) -> str:
@@ -219,6 +222,18 @@ class TTSVoiceCog(commands.Cog):
             return "Голосовой модуль Discord не установлен. Проверь discord.py[voice] и PyNaCl."
         return None
 
+    def _music_active(self, guild_id: int) -> bool:
+        music_cog = self.bot.get_cog("MusicCog")
+        players = getattr(music_cog, "players", None)
+        if not isinstance(players, dict):
+            return False
+        player = players.get(guild_id)
+        if player is None:
+            return False
+        queue = getattr(player, "queue", [])
+        current = getattr(player, "current", None)
+        return current is not None or bool(queue)
+
     def build_embed(self, session: TTSSession, *, enabled: bool = True) -> discord.Embed:
         color = discord.Color.green() if enabled else discord.Color.dark_grey()
         embed = discord.Embed(
@@ -302,15 +317,36 @@ class TTSVoiceCog(commands.Cog):
     async def synthesize_to_file(self, session: TTSSession | None, text: str, voice: str) -> Path:
         if edge_tts is None:
             raise RuntimeError("edge-tts is not installed")
+        if voice not in VOICE_OPTIONS:
+            logger.warning("Unknown TTS voice selected, falling back: voice=%s", voice)
+            voice = DEFAULT_VOICE
+        text = text[:MAX_TTS_PART_LENGTH].strip()
+        if not text:
+            raise RuntimeError("TTS text is empty after cleanup")
         handle = tempfile.NamedTemporaryFile(prefix="discord_tts_", suffix=".mp3", delete=False)
         temp_path = Path(handle.name)
         handle.close()
         if session is not None:
             session.tmp_files.add(temp_path)
         try:
-            communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(str(temp_path))
-            return temp_path
+            lock = session.synth_lock if session is not None else asyncio.Lock()
+            async with lock:
+                for attempt in range(1, TTS_SYNTH_RETRIES + 1):
+                    try:
+                        communicate = edge_tts.Communicate(text, voice)
+                        await communicate.save(str(temp_path))
+                        if not temp_path.exists() or temp_path.stat().st_size <= 0:
+                            raise RuntimeError("edge-tts returned an empty audio file")
+                        return temp_path
+                    except Exception as exc:
+                        no_audio = exc.__class__.__name__ == "NoAudioReceived"
+                        if attempt >= TTS_SYNTH_RETRIES:
+                            if no_audio:
+                                logger.warning("edge-tts returned no audio after retries: voice=%s text=%s", voice, _compact(text))
+                            raise
+                        logger.warning("edge-tts synth retry: attempt=%s voice=%s error=%s", attempt, voice, exc)
+                        await asyncio.sleep(0.5 * attempt)
+            raise RuntimeError("edge-tts synthesis failed")
         except Exception:
             temp_path.unlink(missing_ok=True)
             if session is not None:
@@ -336,7 +372,11 @@ class TTSVoiceCog(commands.Cog):
         def after_play(error: Exception | None) -> None:
             if error:
                 logger.error("TTS playback error: guild=%s error=%s", guild.id, error)
-            self.bot.loop.call_soon_threadsafe(finished.set_result, error is None)
+            def finish() -> None:
+                if not finished.done():
+                    finished.set_result(error is None)
+
+            self.bot.loop.call_soon_threadsafe(finish)
 
         try:
             source = discord.FFmpegPCMAudio(str(file_path), executable=ffmpeg_path)
@@ -401,8 +441,11 @@ class TTSVoiceCog(commands.Cog):
                     file_path = await self.synthesize_to_file(session, item.text, session.selected_voice)
                     await self.send_tts_file(session, item, file_path)
                     await self.play_file(guild, file_path)
-                except Exception:
-                    logger.exception("Failed to process TTS item: guild=%s", session.guild_id)
+                except Exception as exc:
+                    if exc.__class__.__name__ == "NoAudioReceived":
+                        logger.warning("TTS skipped item because edge-tts returned no audio: guild=%s", session.guild_id)
+                    else:
+                        logger.exception("Failed to process TTS item: guild=%s", session.guild_id)
                 finally:
                     if file_path is not None:
                         file_path.unlink(missing_ok=True)
@@ -423,7 +466,7 @@ class TTSVoiceCog(commands.Cog):
         cleaned = clean_tts_text(text)
         if not cleaned:
             return 0
-        parts = split_tts_text(cleaned)
+        parts = split_tts_text(cleaned)[:MAX_TTS_PARTS_PER_MESSAGE]
         queued = 0
         for part in parts:
             if session.queue.full():
@@ -463,10 +506,13 @@ class TTSVoiceCog(commands.Cog):
         voice_client = guild.voice_client if guild else None
         if isinstance(voice_client, discord.VoiceClient):
             try:
-                if voice_client.is_playing() or voice_client.is_paused():
+                music_active = self._music_active(guild_id)
+                if not music_active and (voice_client.is_playing() or voice_client.is_paused()):
                     voice_client.stop()
-                if voice_client.channel and voice_client.channel.id == session.voice_channel_id:
+                if not music_active and voice_client.channel and voice_client.channel.id == session.voice_channel_id:
                     await voice_client.disconnect(force=False)
+                elif music_active:
+                    logger.info("TTS shutdown kept shared voice client for active music: guild=%s", guild_id)
             except (discord.ClientException, discord.HTTPException):
                 logger.exception("Failed to disconnect TTS voice client: guild=%s", guild_id)
 
@@ -603,7 +649,7 @@ class TTSVoiceCog(commands.Cog):
             for file_path in temp_files:
                 file_path.unlink(missing_ok=True)
             active = self.sessions.get(interaction.guild.id)
-            if active is None and isinstance(voice_client, discord.VoiceClient):
+            if active is None and isinstance(voice_client, discord.VoiceClient) and not self._music_active(interaction.guild.id):
                 try:
                     if voice_client.is_playing() or voice_client.is_paused():
                         voice_client.stop()
