@@ -7,3 +7,4 @@ venv/
 cookies/
 youtube-cookies.txt
 *.cookies.txt
+scookies/youtube-cookies.txt
