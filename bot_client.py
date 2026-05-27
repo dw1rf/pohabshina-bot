@@ -13,6 +13,7 @@ from discord.ext import commands, tasks
 from mcstatus import JavaServer
 
 from config import Settings
+from services.jail_service import JailService
 from services.level_service import LevelService
 from services.reputation_service import ReputationService
 from services.reaction_ban_service import ReactionBanService
@@ -39,6 +40,7 @@ class MovieBot(commands.Bot):
 
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
+        self.jails = JailService()
         self.reputation = ReputationService()
         self.reaction_bans = ReactionBanService()
         self.reaction_roles = ReactionRoleService()
@@ -109,6 +111,7 @@ class MovieBot(commands.Bot):
         self.db.row_factory = aiosqlite.Row
 
         await self.levels.init_db(self.db)
+        await self.jails.init_db(self.db)
         await self.reputation.init_rep_db(self.db)
         await self.reaction_bans.init_db(self.db)
         await self.reaction_roles.init_db(self.db)
@@ -251,7 +254,12 @@ class MovieBot(commands.Bot):
 
         channel = guild.get_channel(self.settings.mod_log_channel_id)
         if channel is None:
-            fetched = await self.fetch_channel(self.settings.mod_log_channel_id)
+            try:
+                fetched = await self.fetch_channel(self.settings.mod_log_channel_id)
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                logger.warning("Failed to fetch mod log channel %s: %s", self.settings.mod_log_channel_id, exc)
+                logger.debug("Mod log fetch traceback", exc_info=True)
+                return
             if isinstance(fetched, discord.TextChannel):
                 channel = fetched
 
@@ -264,7 +272,11 @@ class MovieBot(commands.Bot):
             color=color,
             timestamp=datetime.now(UTC),
         )
-        await channel.send(embed=embed)
+        try:
+            await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.warning("Failed to send mod log: guild=%s action=%s error=%s", guild.id, action, exc)
+            logger.debug("Mod log send traceback", exc_info=True)
 
     async def on_tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         if isinstance(error, app_commands.MissingPermissions):
@@ -275,9 +287,14 @@ class MovieBot(commands.Bot):
             text = "Похоже, один из аргументов указан неверно. Проверьте формат и попробуйте снова."
         else:
             logger.exception("App command error", exc_info=error)
+            if interaction.response.is_done():
+                return
             text = "Произошла ошибка при выполнении команды. Попробуйте позже."
 
-        if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            logger.debug("Failed to send app command error response", exc_info=True)
