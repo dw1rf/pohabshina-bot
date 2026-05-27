@@ -357,7 +357,7 @@ class WeddingsCog(commands.Cog):
     async def cog_load(self) -> None:
         self.db = await init_weddings_db()
         await self.cleanup_expired_proposals()
-        logger.info("Weddings cog loaded with database %s", WEDDINGS_DB_PATH)
+        logger.debug("Weddings cog loaded with database %s", WEDDINGS_DB_PATH)
 
     async def cog_unload(self) -> None:
         if self.db is not None:

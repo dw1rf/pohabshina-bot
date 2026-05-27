@@ -49,6 +49,7 @@ class MovieBot(commands.Bot):
         self._extensions_bootstrapped = False
         self._support_category_logged = False
         self._last_mc_status_error: str | None = None
+        self._bad_mod_log_channel_ids: set[int] = set()
         self._mc_server = JavaServer("5.83.140.210", 25780)
 
     async def load_cogs(self) -> tuple[list[str], list[str], list[str]]:
@@ -248,23 +249,30 @@ class MovieBot(commands.Bot):
     async def before_minecraft_presence_loop(self) -> None:
         await self.wait_until_ready()
 
-    async def send_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> None:
+    async def send_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> bool:
         if not self.settings.mod_log_channel_id:
-            return
+            return False
+        if self.settings.mod_log_channel_id in self._bad_mod_log_channel_ids:
+            return False
 
         channel = guild.get_channel(self.settings.mod_log_channel_id)
         if channel is None:
             try:
                 fetched = await self.fetch_channel(self.settings.mod_log_channel_id)
-            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            except discord.NotFound as exc:
+                self._bad_mod_log_channel_ids.add(self.settings.mod_log_channel_id)
                 logger.warning("Failed to fetch mod log channel %s: %s", self.settings.mod_log_channel_id, exc)
                 logger.debug("Mod log fetch traceback", exc_info=True)
-                return
+                return False
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                logger.warning("Failed to fetch mod log channel %s: %s", self.settings.mod_log_channel_id, exc)
+                logger.debug("Mod log fetch traceback", exc_info=True)
+                return False
             if isinstance(fetched, discord.TextChannel):
                 channel = fetched
 
         if not isinstance(channel, discord.TextChannel):
-            return
+            return False
 
         embed = discord.Embed(
             title=f"🛡️ Модерация: {action}",
@@ -277,6 +285,8 @@ class MovieBot(commands.Bot):
         except (discord.Forbidden, discord.HTTPException) as exc:
             logger.warning("Failed to send mod log: guild=%s action=%s error=%s", guild.id, action, exc)
             logger.debug("Mod log send traceback", exc_info=True)
+            return False
+        return True
 
     async def on_tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         if isinstance(error, app_commands.MissingPermissions):
