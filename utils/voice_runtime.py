@@ -75,12 +75,12 @@ def first_version_line(executable: str, *args: str) -> str:
 
 
 def log_binary_version(logger: logging.Logger, name: str, executable: str, *args: str) -> None:
-    logger.info("%s found: path=%s version=%s", name, executable, first_version_line(executable, *args))
+    logger.debug("%s found: path=%s version=%s", name, executable, first_version_line(executable, *args))
 
 
 def log_voice_runtime(logger: logging.Logger) -> None:
-    logger.info("Voice runtime: python=%s platform=%s", sys.version.split()[0], platform.platform())
-    logger.info("Voice runtime: PATH=%s", os.environ.get("PATH", ""))
+    logger.debug("Voice runtime: python=%s platform=%s", sys.version.split()[0], platform.platform())
+    logger.debug("Voice runtime: PATH=%s", os.environ.get("PATH", ""))
 
     ffmpeg_path = find_ffmpeg()
     if ffmpeg_path:
@@ -96,17 +96,17 @@ def log_voice_runtime(logger: logging.Logger) -> None:
     if ffprobe_path:
         log_binary_version(logger, "ffprobe", ffprobe_path, "-version")
     else:
-        logger.warning("ffprobe not found in PATH. The Debian apt package ffmpeg normally installs it together with ffmpeg.")
+        logger.debug("ffprobe not found in PATH. The Debian apt package ffmpeg normally installs it together with ffmpeg.")
 
     deno_path = find_binary("deno")
     if deno_path:
         log_binary_version(logger, "deno", deno_path, "--version")
     else:
-        logger.warning("deno not found in PATH. yt-dlp may warn about missing JavaScript runtime for YouTube.")
+        logger.debug("deno not found in PATH. yt-dlp may warn about missing JavaScript runtime for YouTube.")
 
     try:
         import nacl  # noqa: F401
     except ImportError:
         logger.error("PyNaCl is not installed; Discord voice support is unavailable.")
     else:
-        logger.info("PyNaCl is installed; Discord voice support can load.")
+        logger.debug("PyNaCl is installed; Discord voice support can load.")

@@ -199,6 +199,12 @@ class RelayCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
 
+    async def _reply_ephemeral(self, interaction: discord.Interaction, content: str) -> None:
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=True)
+        else:
+            await interaction.response.send_message(content, ephemeral=True)
+
     async def _get_target_channel(self, channel: discord.TextChannel | None) -> discord.TextChannel | None:
         if channel is not None:
             return channel
@@ -386,15 +392,22 @@ class RelayCog(commands.Cog):
         image_url_text: str,
         image: discord.Attachment | None,
     ) -> None:
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+            except discord.NotFound:
+                logger.warning("Relay modal interaction expired before defer: guild=%s", interaction.guild_id)
+                return
+
         parsed_color = parse_color_strict(_clean_optional(color_text))
         if _clean_optional(color_text) and parsed_color is None:
-            await interaction.response.send_message("Некорректный HEX цвет. Используйте формат #5865F2.", ephemeral=True)
+            await self._reply_ephemeral(interaction, "Некорректный HEX цвет. Используйте формат #5865F2.")
             return
 
         title_value = _clean_optional(title_text)
         footer_value = _clean_optional(footer_text)
         if _embed_text_total(title_value, description, footer_value) > EMBED_TOTAL_LIMIT:
-            await interaction.response.send_message("Embed слишком длинный. Общий лимит текста: 6000 символов.", ephemeral=True)
+            await self._reply_ephemeral(interaction, "Embed слишком длинный. Общий лимит текста: 6000 символов.")
             return
 
         embed = discord.Embed(
@@ -417,15 +430,15 @@ class RelayCog(commands.Cog):
             use_attachment_url=use_attachment_url,
         )
         if not sent:
-            await interaction.response.send_message(
+            await self._reply_ephemeral(
+                interaction,
                 fallback_warning or "Не удалось отправить embed. Проверьте права бота и параметры.",
-                ephemeral=True,
             )
             return
 
         warnings = [value for value in (warning, fallback_warning) if value]
         suffix = f"\nПредупреждение: {' '.join(warnings)}" if warnings else ""
-        await interaction.response.send_message(f"✅ Embed отправлен.{suffix}", ephemeral=True)
+        await self._reply_ephemeral(interaction, f"✅ Embed отправлен.{suffix}")
 
     async def handle_say_afisha_details_modal(
         self,
@@ -440,6 +453,13 @@ class RelayCog(commands.Cog):
         footer_text: str,
         image: discord.Attachment | None,
     ) -> None:
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+            except discord.NotFound:
+                logger.warning("Relay afisha modal interaction expired before defer: guild=%s", interaction.guild_id)
+                return
+
         type_value = _clean_optional(draft.type_text) or "Афиша"
         title_value = _clean_optional(draft.title_text) or "Без названия"
         footer_value = _clean_optional(footer_text)
@@ -456,10 +476,10 @@ class RelayCog(commands.Cog):
         ]
         embed_description = "\n".join(parts)
         if len(embed_description) > DESCRIPTION_LIMIT:
-            await interaction.response.send_message("Описание афиши слишком длинное. Лимит description: 4096 символов.", ephemeral=True)
+            await self._reply_ephemeral(interaction, "Описание афиши слишком длинное. Лимит description: 4096 символов.")
             return
         if _embed_text_total(title_value, embed_description, footer_value) > EMBED_TOTAL_LIMIT:
-            await interaction.response.send_message("Embed афиши слишком длинный. Общий лимит текста: 6000 символов.", ephemeral=True)
+            await self._reply_ephemeral(interaction, "Embed афиши слишком длинный. Общий лимит текста: 6000 символов.")
             return
 
         embed = discord.Embed(title=title_value, description=embed_description, color=discord.Color.dark_gold())
@@ -478,15 +498,15 @@ class RelayCog(commands.Cog):
             use_attachment_url=use_attachment_url,
         )
         if not sent:
-            await interaction.response.send_message(
+            await self._reply_ephemeral(
+                interaction,
                 fallback_warning or "Не удалось отправить афишу. Проверьте права бота и параметры.",
-                ephemeral=True,
             )
             return
 
         warnings = [value for value in (warning, fallback_warning) if value]
         suffix = f"\nПредупреждение: {' '.join(warnings)}" if warnings else ""
-        await interaction.response.send_message(f"✅ Афиша отправлена.{suffix}", ephemeral=True)
+        await self._reply_ephemeral(interaction, f"✅ Афиша отправлена.{suffix}")
 
     @app_commands.command(name="say", description="Отправить сообщение от имени бота в текущий канал")
     @app_commands.default_permissions(administrator=True)

@@ -29,6 +29,8 @@ except ImportError:  # pragma: no cover - handled at runtime for clearer Discord
 logger = logging.getLogger(__name__)
 
 FFMPEG_BEFORE_OPTIONS = (
+    "-hide_banner "
+    "-loglevel warning "
     "-reconnect 1 "
     "-reconnect_streamed 1 "
     "-reconnect_delay_max 5 "
@@ -218,7 +220,7 @@ class MusicControlView(discord.ui.View):
                 await interaction.response.defer(ephemeral=ephemeral)
             return True
         except discord.NotFound:
-            logger.warning("Music panel interaction expired before defer: guild=%s", interaction.guild_id)
+            logger.debug("Music panel interaction expired before defer: guild=%s", interaction.guild_id)
             return False
         except discord.InteractionResponded:
             return True
@@ -227,7 +229,7 @@ class MusicControlView(discord.ui.View):
         try:
             await interaction.response.send_modal(modal)
         except discord.NotFound:
-            logger.warning("Music panel interaction expired before modal: guild=%s", interaction.guild_id)
+            logger.debug("Music panel interaction expired before modal: guild=%s", interaction.guild_id)
         except discord.InteractionResponded:
             logger.debug("Music panel modal skipped because interaction was already answered: guild=%s", interaction.guild_id)
 
@@ -243,7 +245,7 @@ class MusicControlView(discord.ui.View):
             else:
                 await interaction.response.send_message(**kwargs)
         except discord.NotFound:
-            logger.warning("Music panel interaction expired before message: guild=%s", interaction.guild_id)
+            logger.debug("Music panel interaction expired before message: guild=%s", interaction.guild_id)
         except discord.InteractionResponded:
             logger.debug("Music panel interaction already answered: guild=%s", interaction.guild_id)
 
@@ -270,7 +272,7 @@ class MusicControlView(discord.ui.View):
         try:
             await interaction.followup.send("\n".join(messages) if messages else "Готово.", ephemeral=True)
         except discord.NotFound:
-            logger.warning("Music panel followup expired: guild=%s", interaction.guild_id)
+            logger.debug("Music panel followup expired: guild=%s", interaction.guild_id)
 
     @discord.ui.button(label="Добавить", style=discord.ButtonStyle.primary, custom_id="music_panel:add", row=0)
     async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
@@ -458,7 +460,7 @@ class MusicCog(commands.Cog):
         self.bot.add_view(MusicControlView(self))
         ffmpeg_path = self.ffmpeg_executable()
         if ffmpeg_path:
-            logger.info("Music cog found FFmpeg: %s", ffmpeg_path)
+            logger.debug("Music cog found FFmpeg: %s", ffmpeg_path)
             self.log_ffmpeg_details(ffmpeg_path)
         else:
             logger.error("%s Music playback commands will return a clear user error.", FFMPEG_MISSING_MESSAGE)
@@ -648,7 +650,7 @@ class MusicCog(commands.Cog):
             noplaylist=not effective_allow_playlist,
             playlistend=MAX_PLAYLIST_TRACKS,
         )
-        logger.info(
+        logger.debug(
             "yt-dlp extract: query=%s playlist=%s cookies=%s",
             clean_query,
             effective_allow_playlist,

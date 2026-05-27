@@ -26,6 +26,16 @@ def _parse_bool(raw: str, default: bool = False) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _normalize_discord_id(raw: str | None) -> tuple[str, int, str | None]:
+    value = (raw or "").strip()
+    cleaned = value.strip("\"'").strip()
+    if not cleaned:
+        return value, 0, "SUPPORT_CATEGORY_ID is not set"
+    if not cleaned.isdigit():
+        return value, 0, f"SUPPORT_CATEGORY_ID is invalid: {value}"
+    return value, int(cleaned), None
+
+
 @dataclass(slots=True)
 class Settings:
     discord_token: str
@@ -44,7 +54,9 @@ class Settings:
     translate_target_lang: str
     show_both_titles: bool
     db_path: str
+    support_category_raw: str
     support_category_id: int
+    support_category_error: str | None
     support_admin_role_id: int
     support_log_channel_id: int
     shop_requests_to_support: bool
@@ -62,6 +74,9 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    support_category_raw, support_category_id, support_category_error = _normalize_discord_id(
+        os.getenv("SUPPORT_CATEGORY_ID")
+    )
     return Settings(
         discord_token=os.getenv("DISCORD_TOKEN", "").strip(),
         watchmode_api_key=os.getenv("WATCHMODE_API_KEY", "").strip(),
@@ -79,7 +94,9 @@ def load_settings() -> Settings:
         translate_target_lang=os.getenv("TRANSLATE_TARGET_LANG", "ru").strip() or "ru",
         show_both_titles=_parse_bool(os.getenv("SHOW_BOTH_TITLES", "1"), default=True),
         db_path=os.getenv("SQLITE_PATH", "data/bot.db"),
-        support_category_id=int(os.getenv("SUPPORT_CATEGORY_ID", "0") or 0),
+        support_category_raw=support_category_raw,
+        support_category_id=support_category_id,
+        support_category_error=support_category_error,
         support_admin_role_id=int(os.getenv("SUPPORT_ADMIN_ROLE_ID", "0") or 0),
         support_log_channel_id=int(os.getenv("SUPPORT_LOG_CHANNEL_ID", "0") or 0),
         shop_requests_to_support=_parse_bool(os.getenv("SHOP_REQUESTS_TO_SUPPORT", "true"), default=True),

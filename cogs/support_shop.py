@@ -15,6 +15,25 @@ from cogs.social_game_content import SERVICE_INSTRUCTIONS, SHOP_DEFAULT_INSTRUCT
 logger = logging.getLogger(__name__)
 
 
+SUPPORT_PERMISSION_CHECKS: tuple[tuple[str, str], ...] = (
+    ("view_channel", "View Channel"),
+    ("manage_channels", "Manage Channels"),
+    ("manage_roles", "Manage Permissions"),
+    ("send_messages", "Send Messages"),
+    ("embed_links", "Embed Links"),
+    ("read_message_history", "Read Message History"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SupportCategoryLookup:
+    category: discord.CategoryChannel | None = None
+    cached_channel: discord.abc.GuildChannel | None = None
+    fetched_channel: discord.abc.GuildChannel | None = None
+    error: str | None = None
+    missing_permissions: tuple[str, ...] = ()
+
+
 def add_safe_field(embed: discord.Embed, name: str, value: str, inline: bool = False) -> None:
     if len(value) <= 1024:
         embed.add_field(name=name, value=value, inline=inline)
@@ -348,17 +367,78 @@ class SupportShopCog(commands.Cog):
             embeds.append(embed)
         return embeds
 
+    @staticmethod
+    def _missing_support_permissions(permissions: discord.Permissions) -> tuple[str, ...]:
+        return tuple(label for attr, label in SUPPORT_PERMISSION_CHECKS if not getattr(permissions, attr))
+
+    @staticmethod
+    def _format_permissions(permissions: discord.Permissions | None) -> str:
+        if permissions is None:
+            return "unavailable"
+        return ", ".join(f"{label}={'yes' if getattr(permissions, attr) else 'no'}" for attr, label in SUPPORT_PERMISSION_CHECKS)
+
+    async def _lookup_support_category(self, guild: discord.Guild) -> SupportCategoryLookup:
+        if self.bot.settings.support_category_error:
+            return SupportCategoryLookup(error=self.bot.settings.support_category_error)
+
+        category_id = self.bot.settings.support_category_id
+        cached = guild.get_channel(category_id)
+        if cached is not None and not isinstance(cached, discord.CategoryChannel):
+            return SupportCategoryLookup(
+                cached_channel=cached,
+                error=f"SUPPORT_CATEGORY_ID points to {type(cached).__name__}, not CategoryChannel",
+            )
+        if isinstance(cached, discord.CategoryChannel):
+            category = cached
+            fetched = None
+        else:
+            try:
+                fetched = await self.bot.fetch_channel(category_id)
+            except discord.NotFound:
+                return SupportCategoryLookup(error=f"Support category not found: id={category_id}")
+            except discord.Forbidden:
+                return SupportCategoryLookup(error=f"Support category fetch forbidden: id={category_id}")
+            except discord.HTTPException as exc:
+                return SupportCategoryLookup(error=f"Support category fetch failed: id={category_id} error={exc}")
+
+            if not isinstance(fetched, discord.CategoryChannel):
+                return SupportCategoryLookup(
+                    fetched_channel=fetched if isinstance(fetched, discord.abc.GuildChannel) else None,
+                    error=f"SUPPORT_CATEGORY_ID points to {type(fetched).__name__}, not CategoryChannel",
+                )
+            category = fetched
+
+        if category.guild.id != guild.id:
+            return SupportCategoryLookup(
+                category=category,
+                cached_channel=cached,
+                fetched_channel=fetched,
+                error=f"Support category belongs to another guild: category_guild={category.guild.id} current_guild={guild.id}",
+            )
+
+        me = guild.me
+        if me is None and self.bot.user is not None:
+            me = guild.get_member(self.bot.user.id)
+        if me is None:
+            return SupportCategoryLookup(
+                category=category,
+                cached_channel=cached,
+                fetched_channel=fetched,
+                error="Bot member is unavailable in this guild",
+            )
+
+        missing = self._missing_support_permissions(category.permissions_for(me))
+        return SupportCategoryLookup(
+            category=category,
+            cached_channel=cached,
+            fetched_channel=fetched,
+            missing_permissions=missing,
+            error=f"Support category permissions missing: {', '.join(missing)}" if missing else None,
+        )
+
     async def _find_support_category(self, guild: discord.Guild) -> discord.CategoryChannel | None:
-        if not self.bot.settings.support_category_id:
-            return None
-        category = guild.get_channel(self.bot.settings.support_category_id)
-        if isinstance(category, discord.CategoryChannel):
-            return category
-        try:
-            fetched = await self.bot.fetch_channel(self.bot.settings.support_category_id)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            return None
-        return fetched if isinstance(fetched, discord.CategoryChannel) else None
+        lookup = await self._lookup_support_category(guild)
+        return lookup.category if lookup.error is None else None
 
     def _admin_role(self, guild: discord.Guild) -> discord.Role | None:
         if not self.bot.settings.support_admin_role_id:
@@ -411,20 +491,34 @@ class SupportShopCog(commands.Cog):
             await self._safe_reply(interaction, "Команда доступна только на сервере.")
             return None
 
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer(ephemeral=True, thinking=True)
+            except discord.NotFound:
+                logger.warning("Support ticket interaction expired before defer: guild=%s user=%s", guild.id, user.id)
+                return None
+
         existing_ticket, existing_channel = await self._get_open_ticket_channel(guild, user.id)
         if existing_ticket and existing_channel:
             if announce:
                 await self._safe_reply(interaction, f"У вас уже есть открытое обращение: {existing_channel.mention}")
             return existing_channel
 
-        category = await self._find_support_category(guild)
-        if category is None:
+        category_lookup = await self._lookup_support_category(guild)
+        category = category_lookup.category
+        if category is None or category_lookup.error:
+            logger.warning(
+                "Support category is not usable: guild=%s raw=%r parsed=%s error=%s",
+                guild.id,
+                self.bot.settings.support_category_raw,
+                self.bot.settings.support_category_id,
+                category_lookup.error,
+            )
             await self._safe_reply(
                 interaction,
-                "Не настроена категория поддержки. Укажите SUPPORT_CATEGORY_ID и убедитесь, что бот видит эту категорию.",
+                f"Support category is not ready: {category_lookup.error or 'unknown error'}. Ask an admin to run /support_debug.",
             )
             return None
-
         admin_role = self._admin_role(guild)
         if admin_role is None:
             await self._safe_reply(
@@ -447,12 +541,14 @@ class SupportShopCog(commands.Cog):
                 read_message_history=True,
                 manage_messages=True,
                 manage_channels=True,
+                manage_roles=True,
             ),
             me: discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
                 manage_channels=True,
+                manage_roles=True,
                 manage_messages=True,
                 embed_links=True,
             ),
@@ -461,12 +557,12 @@ class SupportShopCog(commands.Cog):
         channel_name = f"ticket-{user.id}"
         try:
             channel = await guild.create_text_channel(name=channel_name, category=category, overwrites=overwrites, reason=f"Support ticket for {user} ({user.id})")
-        except discord.Forbidden:
-            logger.exception("Missing permissions while creating support channel")
+        except discord.Forbidden as exc:
+            logger.warning("Missing permissions while creating support channel: guild=%s category=%s error=%s", guild.id, category.id, exc)
             await self._safe_reply(interaction, "Не удалось создать канал: боту не хватает прав.")
             return None
-        except discord.HTTPException:
-            logger.exception("HTTP error while creating support channel")
+        except discord.HTTPException as exc:
+            logger.warning("HTTP error while creating support channel: guild=%s category=%s error=%s", guild.id, category.id, exc)
             await self._safe_reply(interaction, "Ошибка Discord API при создании обращения. Попробуйте позже.")
             return None
 
@@ -585,6 +681,60 @@ class SupportShopCog(commands.Cog):
             interaction,
             f"Заявка создана: {ticket_channel.mention}\n\n**Инструкция:** {instruction}",
         )
+
+    @app_commands.command(name="support_debug", description="Show support category diagnostics")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    async def support_debug(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This command is only available in a server.", ephemeral=True)
+            return
+        if not self._is_admin(interaction.user):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        guild = interaction.guild
+        category_id = self.bot.settings.support_category_id
+        cached = guild.get_channel(category_id) if category_id else None
+        lookup = await self._lookup_support_category(guild)
+        category = lookup.category
+        fetched = lookup.fetched_channel
+        if fetched is None and category_id and cached is None:
+            try:
+                candidate = await self.bot.fetch_channel(category_id)
+            except discord.NotFound:
+                fetched_status = "not found"
+            except discord.Forbidden:
+                fetched_status = "forbidden"
+            except discord.HTTPException as exc:
+                fetched_status = f"http error: {exc}"
+            else:
+                fetched = candidate if isinstance(candidate, discord.abc.GuildChannel) else None
+                fetched_status = type(candidate).__name__
+        else:
+            fetched_status = type(fetched).__name__ if fetched is not None else "not needed"
+
+        me = guild.me
+        if me is None and self.bot.user is not None:
+            me = guild.get_member(self.bot.user.id)
+        permissions = category.permissions_for(me) if category is not None and me is not None else None
+        missing = self._missing_support_permissions(permissions) if permissions is not None else ()
+        result = "OK" if category is not None and lookup.error is None and not missing else f"ERROR: {lookup.error or 'missing permissions'}"
+
+        lines = [
+            "**Support debug**",
+            f"SUPPORT_CATEGORY_ID raw: `{self.bot.settings.support_category_raw}`",
+            f"parsed int ID: `{category_id or None}`",
+            f"cache: `{type(cached).__name__ if cached is not None else 'not found'}`",
+            f"fetch: `{fetched_status}`",
+            f"category name: `{category.name if category is not None else None}`",
+            f"guild id: `{guild.id}`",
+            f"permissions: `{self._format_permissions(permissions)}`",
+            f"missing: `{', '.join(missing) if missing else 'none'}`",
+            f"result: `{result}`",
+        ]
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="support_panel", description="Отправить панель технической поддержки")
     @app_commands.default_permissions(manage_guild=True)

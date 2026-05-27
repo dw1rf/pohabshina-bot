@@ -6,6 +6,10 @@ SHOP_DEFAULT_INSTRUCTION = (
 
 SERVICE_INSTRUCTIONS: dict[str, str] = {
     # твои инструкции услуг (оставь как было)
+    "unban": (
+        "Describe the ban details, account ID, ban reason if known, and wait for an administrator. "
+        "Do not send payment until an administrator confirms the request."
+    ),
 }
 
 SHOP_SERVICE_INSTRUCTIONS = SERVICE_INSTRUCTIONS
