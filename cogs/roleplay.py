@@ -81,7 +81,7 @@ class RoleplayCog(commands.Cog):
                 logger.exception("Failed to sync RP guild commands: guild=%s added=%s", guild.id, added)
                 return
         self._synced_guilds.add(guild.id)
-        logger.info("RP guild commands synced: guild=%s added=%s total=%s", guild.id, added, len(self._registered))
+        logger.debug("RP guild commands synced: guild=%s added=%s total=%s", guild.id, added, len(self._registered))
 
     def _make_callback(self, action_key: str):
         @app_commands.describe(target="Участник RP-сцены", comment="Необязательный короткий комментарий")

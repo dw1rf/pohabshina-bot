@@ -116,11 +116,12 @@ class ModerationCog(commands.Cog):
         except discord.HTTPException:
             logger.debug("Failed to send moderation reply", exc_info=True)
 
-    async def _safe_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> None:
+    async def _safe_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> bool:
         try:
-            await self.bot.send_mod_log(guild, action, description, color)
+            return await self.bot.send_mod_log(guild, action, description, color)
         except Exception:
             logger.exception("Unexpected mod log failure: guild=%s action=%s", guild.id, action)
+            return False
 
     @staticmethod
     def _can_use_jail(member: discord.Member | discord.User) -> bool:
@@ -363,8 +364,35 @@ class ModerationCog(commands.Cog):
             f"Канал: <#{record.channel_id}>\n"
             f"Текст: {truncate_text(text, 1200)}"
         )
-        await self._safe_mod_log(guild, "jail appeal", message, discord.Color.blurple())
-        await self._safe_reply(interaction, "Апелляция отправлена администрации.")
+        sent_to_log = await self._safe_mod_log(guild, "jail appeal", message, discord.Color.blurple())
+        if sent_to_log:
+            await self._safe_reply(interaction, "Апелляция отправлена администрации.")
+            return
+
+        channel = guild.get_channel(record.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            channel = interaction.channel if isinstance(interaction.channel, discord.TextChannel) else None
+        if isinstance(channel, discord.TextChannel):
+            embed = discord.Embed(
+                title="Jail appeal",
+                description=message,
+                color=discord.Color.blurple(),
+                timestamp=_utcnow(),
+            )
+            try:
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+                await self._safe_reply(
+                    interaction,
+                    "MOD_LOG_CHANNEL_ID недоступен, поэтому апелляция опубликована в этом jail-канале для администрации.",
+                )
+                return
+            except discord.HTTPException:
+                logger.warning("Failed to send jail appeal fallback: guild=%s channel=%s", guild.id, channel.id)
+
+        await self._safe_reply(
+            interaction,
+            "Не удалось отправить апелляцию: MOD_LOG_CHANNEL_ID не настроен или недоступен.",
+        )
 
     async def send_jail_remaining(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
