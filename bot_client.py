@@ -13,6 +13,7 @@ from discord.ext import commands, tasks
 from mcstatus import JavaServer
 
 from config import Settings
+from services.jail_service import JailService
 from services.level_service import LevelService
 from services.reputation_service import ReputationService
 from services.reaction_ban_service import ReactionBanService
@@ -39,6 +40,7 @@ class MovieBot(commands.Bot):
 
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
+        self.jails = JailService()
         self.reputation = ReputationService()
         self.reaction_bans = ReactionBanService()
         self.reaction_roles = ReactionRoleService()
@@ -47,6 +49,7 @@ class MovieBot(commands.Bot):
         self._extensions_bootstrapped = False
         self._support_category_logged = False
         self._last_mc_status_error: str | None = None
+        self._bad_mod_log_channel_ids: set[int] = set()
         self._mc_server = JavaServer("5.83.140.210", 25780)
 
     async def load_cogs(self) -> tuple[list[str], list[str], list[str]]:
@@ -109,6 +112,7 @@ class MovieBot(commands.Bot):
         self.db.row_factory = aiosqlite.Row
 
         await self.levels.init_db(self.db)
+        await self.jails.init_db(self.db)
         await self.reputation.init_rep_db(self.db)
         await self.reaction_bans.init_db(self.db)
         await self.reaction_roles.init_db(self.db)
@@ -245,18 +249,30 @@ class MovieBot(commands.Bot):
     async def before_minecraft_presence_loop(self) -> None:
         await self.wait_until_ready()
 
-    async def send_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> None:
+    async def send_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> bool:
         if not self.settings.mod_log_channel_id:
-            return
+            return False
+        if self.settings.mod_log_channel_id in self._bad_mod_log_channel_ids:
+            return False
 
         channel = guild.get_channel(self.settings.mod_log_channel_id)
         if channel is None:
-            fetched = await self.fetch_channel(self.settings.mod_log_channel_id)
+            try:
+                fetched = await self.fetch_channel(self.settings.mod_log_channel_id)
+            except discord.NotFound as exc:
+                self._bad_mod_log_channel_ids.add(self.settings.mod_log_channel_id)
+                logger.warning("Failed to fetch mod log channel %s: %s", self.settings.mod_log_channel_id, exc)
+                logger.debug("Mod log fetch traceback", exc_info=True)
+                return False
+            except (discord.Forbidden, discord.HTTPException) as exc:
+                logger.warning("Failed to fetch mod log channel %s: %s", self.settings.mod_log_channel_id, exc)
+                logger.debug("Mod log fetch traceback", exc_info=True)
+                return False
             if isinstance(fetched, discord.TextChannel):
                 channel = fetched
 
         if not isinstance(channel, discord.TextChannel):
-            return
+            return False
 
         embed = discord.Embed(
             title=f"🛡️ Модерация: {action}",
@@ -264,7 +280,13 @@ class MovieBot(commands.Bot):
             color=color,
             timestamp=datetime.now(UTC),
         )
-        await channel.send(embed=embed)
+        try:
+            await channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.warning("Failed to send mod log: guild=%s action=%s error=%s", guild.id, action, exc)
+            logger.debug("Mod log send traceback", exc_info=True)
+            return False
+        return True
 
     async def on_tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
         if isinstance(error, app_commands.MissingPermissions):
@@ -275,9 +297,14 @@ class MovieBot(commands.Bot):
             text = "Похоже, один из аргументов указан неверно. Проверьте формат и попробуйте снова."
         else:
             logger.exception("App command error", exc_info=error)
+            if interaction.response.is_done():
+                return
             text = "Произошла ошибка при выполнении команды. Попробуйте позже."
 
-        if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=True)
-        else:
-            await interaction.response.send_message(text, ephemeral=True)
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            logger.debug("Failed to send app command error response", exc_info=True)
