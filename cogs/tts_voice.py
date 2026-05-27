@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - handled at runtime for clearer Discord
 
 logger = logging.getLogger(__name__)
 
+FFMPEG_BEFORE_OPTIONS = "-hide_banner -loglevel warning"
 IDLE_TIMEOUT_SECONDS = 10 * 60
 MESSAGE_COOLDOWN_SECONDS = 1.5
 MAX_QUEUE_SIZE = 10
@@ -379,7 +380,7 @@ class TTSVoiceCog(commands.Cog):
             self.bot.loop.call_soon_threadsafe(finish)
 
         try:
-            source = discord.FFmpegPCMAudio(str(file_path), executable=ffmpeg_path)
+            source = discord.FFmpegPCMAudio(str(file_path), executable=ffmpeg_path, before_options=FFMPEG_BEFORE_OPTIONS)
             voice_client.play(source, after=after_play)
             return bool(await finished)
         except Exception:
@@ -673,7 +674,7 @@ class TTSVoiceCog(commands.Cog):
 
         now = time.monotonic()
         if now - session.last_message_at < MESSAGE_COOLDOWN_SECONDS:
-            logger.info("TTS message skipped by cooldown: guild=%s owner=%s", session.guild_id, session.owner_id)
+            logger.debug("TTS message skipped by cooldown: guild=%s owner=%s", session.guild_id, session.owner_id)
             return
         session.last_message_at = now
 
@@ -685,7 +686,7 @@ class TTSVoiceCog(commands.Cog):
             send_file=True,
         )
         if queued:
-            logger.info("TTS message queued: guild=%s owner=%s parts=%s", session.guild_id, session.owner_id, queued)
+            logger.debug("TTS message queued: guild=%s owner=%s parts=%s", session.guild_id, session.owner_id, queued)
 
     @commands.Cog.listener()
     async def on_voice_state_update(

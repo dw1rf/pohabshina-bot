@@ -21,7 +21,7 @@ from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
 from services.social_game_service import SocialGameService
 from utils.command_localizations import RussianCommandNameTranslator
-from utils.voice_runtime import log_voice_runtime
+from utils.voice_runtime import find_ffmpeg, log_voice_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -45,14 +45,16 @@ class MovieBot(commands.Bot):
         self.support_tickets = SupportTicketService()
         self.social_games = SocialGameService()
         self._extensions_bootstrapped = False
+        self._support_category_logged = False
+        self._last_mc_status_error: str | None = None
         self._mc_server = JavaServer("5.83.140.210", 25780)
 
-    async def load_cogs(self) -> list[str]:
+    async def load_cogs(self) -> tuple[list[str], list[str], list[str]]:
         cogs_dir = Path(__file__).resolve().parent / "cogs"
 
         if not cogs_dir.exists():
             logger.error("Cogs directory not found: %s", cogs_dir)
-            return []
+            return [], [], []
 
         loaded: list[str] = []
         failed: list[str] = []
@@ -72,13 +74,13 @@ class MovieBot(commands.Bot):
 
             if "async def setup" not in module_source:
                 skipped.append(extension)
-                logger.info("Extension has no async setup, skip: %s", extension)
+                logger.debug("Extension has no async setup, skip: %s", extension)
                 continue
 
             try:
                 if extension in self.extensions:
                     skipped.append(extension)
-                    logger.info("Extension already loaded, skip: %s", extension)
+                    logger.debug("Extension already loaded, skip: %s", extension)
                     continue
                 await self.load_extension(extension)
             except Exception:
@@ -86,15 +88,15 @@ class MovieBot(commands.Bot):
                 logger.exception("Failed to load extension: %s", extension)
             else:
                 loaded.append(extension)
-                logger.info("Loaded extension: %s", extension)
+                logger.debug("Loaded extension: %s", extension)
 
-        logger.info("Cogs loaded: %s", loaded)
+        logger.debug("Cogs loaded: %s", loaded)
         if skipped:
-            logger.info("Cogs skipped: %s", skipped)
+            logger.debug("Cogs skipped: %s", skipped)
         if failed:
             logger.warning("Cogs failed to load: %s", failed)
 
-        return loaded
+        return loaded, skipped, failed
 
     async def setup_hook(self) -> None:
         if self._extensions_bootstrapped:
@@ -115,13 +117,20 @@ class MovieBot(commands.Bot):
         await self.watchmode.load_genres(self.session)
         log_voice_runtime(logger)
 
-        loaded_cogs = await self.load_cogs()
+        loaded_cogs, skipped_cogs, failed_cogs = await self.load_cogs()
 
         self.tree.on_error = self.on_tree_error
         await self.tree.set_translator(RussianCommandNameTranslator())
         await self.tree.sync()
         self._extensions_bootstrapped = True
-        logger.info("Bot started, genres loaded: %s, cogs loaded: %s", len(self.watchmode.genre_id_to_name), loaded_cogs)
+        logger.info(
+            "Bot started: cogs_loaded=%s, cogs_skipped=%s, voice_ready=%s",
+            len(loaded_cogs),
+            len(skipped_cogs),
+            bool(find_ffmpeg()),
+        )
+        if failed_cogs:
+            logger.warning("Bot started with failed cogs: count=%s", len(failed_cogs))
 
     def _prepare_database_path(self) -> None:
         db_path = Path(self.settings.db_path)
@@ -148,7 +157,69 @@ class MovieBot(commands.Bot):
     async def on_ready(self) -> None:
         if not self.minecraft_presence_loop.is_running():
             self.minecraft_presence_loop.start()
-        logger.info("Logged in as %s (ID: %s)", self.user, self.user.id if self.user else "unknown")
+        logger.debug("Logged in as %s (ID: %s)", self.user, self.user.id if self.user else "unknown")
+        if not self._support_category_logged:
+            self._support_category_logged = True
+            await self.log_support_category_startup_diagnostics()
+
+    @staticmethod
+    def _missing_support_permissions(permissions: discord.Permissions) -> list[str]:
+        required = {
+            "view_channel": permissions.view_channel,
+            "manage_channels": permissions.manage_channels,
+            "manage_permissions": permissions.manage_roles,
+            "send_messages": permissions.send_messages,
+            "embed_links": permissions.embed_links,
+            "read_message_history": permissions.read_message_history,
+        }
+        return [name for name, allowed in required.items() if not allowed]
+
+    async def log_support_category_startup_diagnostics(self) -> None:
+        if self.settings.support_category_error:
+            logger.warning("%s", self.settings.support_category_error)
+            return
+
+        category_id = self.settings.support_category_id
+        cached = self.get_channel(category_id)
+        category: discord.CategoryChannel | None = cached if isinstance(cached, discord.CategoryChannel) else None
+        if cached is not None and category is None:
+            logger.warning("SUPPORT_CATEGORY_ID points to %s, not CategoryChannel: id=%s", type(cached).__name__, category_id)
+            return
+
+        if category is None:
+            try:
+                fetched = await self.fetch_channel(category_id)
+            except discord.NotFound:
+                logger.warning("Support category not found through cache or fetch: id=%s", category_id)
+                return
+            except discord.Forbidden:
+                logger.warning("Support category fetch forbidden: id=%s", category_id)
+                return
+            except discord.HTTPException as exc:
+                logger.warning("Support category fetch failed: id=%s error=%s", category_id, exc)
+                return
+            if not isinstance(fetched, discord.CategoryChannel):
+                logger.warning("SUPPORT_CATEGORY_ID points to %s, not CategoryChannel: id=%s", type(fetched).__name__, category_id)
+                return
+            category = fetched
+
+        me = category.guild.me
+        if me is None and self.user is not None:
+            me = category.guild.get_member(self.user.id)
+        if me is None:
+            logger.warning("Support category found but bot member is unavailable: id=%s guild=%s", category.id, category.guild.id)
+            return
+
+        missing = self._missing_support_permissions(category.permissions_for(me))
+        if missing:
+            logger.warning(
+                "Support category permissions missing: id=%s guild=%s missing=%s",
+                category.id,
+                category.guild.id,
+                ",".join(missing),
+            )
+            return
+        logger.info("Support category ready: id=%s guild=%s name=%s", category.id, category.guild.id, category.name)
 
     @tasks.loop(seconds=60)
     async def minecraft_presence_loop(self) -> None:
@@ -157,10 +228,18 @@ class MovieBot(commands.Bot):
             online = status.players.online
             max_players = status.players.max
             activity = discord.Game(name=f"Онлайн: {online}/{max_players}")
-        except Exception:
-            logger.exception("Failed to fetch Minecraft server status")
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
+            if message != self._last_mc_status_error:
+                logger.warning("Failed to fetch Minecraft server status: %s", message)
+                logger.debug("Minecraft server status traceback", exc_info=True)
+                self._last_mc_status_error = message
             activity = discord.Game(name="Онлайн: offline")
-        await self.change_presence(status=discord.Status.online, activity=activity)
+        try:
+            await self.change_presence(status=discord.Status.online, activity=activity)
+        except Exception as exc:
+            logger.warning("Failed to update Minecraft presence: %s", exc)
+            logger.debug("Minecraft presence traceback", exc_info=True)
 
     @minecraft_presence_loop.before_loop
     async def before_minecraft_presence_loop(self) -> None:

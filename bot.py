@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import logging
+import os
 from pathlib import Path
 
 from config import load_settings
@@ -22,10 +23,23 @@ def _project_python_files() -> list[Path]:
 
 
 def configure_logging() -> None:
+    log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    noisy_defaults = {
+        "discord": "WARNING",
+        "discord.gateway": "WARNING",
+        "discord.voice_state": "WARNING",
+        "discord.player": "WARNING",
+        "yt_dlp": "WARNING",
+        "asyncio": "WARNING",
+    }
+    for logger_name, default_level in noisy_defaults.items():
+        env_name = f"{logger_name.upper().replace('.', '_')}_LOG_LEVEL"
+        configured = os.getenv(env_name, default_level).strip().upper() or default_level
+        logging.getLogger(logger_name).setLevel(getattr(logging, configured, logging.WARNING))
 
 
 def _find_merge_artifacts() -> list[str]:

@@ -126,6 +126,7 @@ SQLITE_PATH=data/bot.db
 ### Поддержка и магазин (новое)
 
 ```env
+LOG_LEVEL=INFO
 SUPPORT_CATEGORY_ID=0
 SUPPORT_ADMIN_ROLE_ID=0
 SUPPORT_LOG_CHANNEL_ID=0
@@ -138,6 +139,8 @@ SHOP_REQUESTS_TO_SUPPORT=true
 - `SUPPORT_ADMIN_ROLE_ID` — роль администраторов поддержки (видят и закрывают тикеты).
 - `SUPPORT_LOG_CHANNEL_ID` — канал логов закрытия тикетов (опционально, `0` = выключено).
 - `SHOP_REQUESTS_TO_SUPPORT` — включение заявок из shop-панели (`true/false`).
+- `LOG_LEVEL` — общий уровень логов (`INFO` по умолчанию, `DEBUG` для диагностики).
+- `/support_debug` — админская slash-команда для проверки `SUPPORT_CATEGORY_ID`, cache/fetch и прав бота в категории.
 
 ---
 
