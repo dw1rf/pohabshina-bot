@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from collections import deque
 
 import discord
@@ -10,11 +11,11 @@ from bot_client import MovieBot
 
 logger = logging.getLogger(__name__)
 
-REP_COMMANDS: dict[str, tuple[int, str]] = {
-    "+реп": (1, "+реп"),
-    "+rep": (1, "+реп"),
-    "-реп": (-1, "-реп"),
-    "-rep": (-1, "-реп"),
+REP_COMMANDS: dict[str, int] = {
+    "+реп": 1,
+    "+rep": 1,
+    "-реп": -1,
+    "-rep": -1,
 }
 
 
@@ -29,10 +30,9 @@ class ReputationCog(commands.Cog):
             return
 
         normalized_content = (message.content or "").strip().lower()
-        rep_command = REP_COMMANDS.get(normalized_content)
-        if rep_command is not None:
-            value, label = rep_command
-            await self._handle_reputation_message(message, value, label)
+        value = REP_COMMANDS.get(normalized_content)
+        if value is not None:
+            await self._handle_reputation_message(message, value)
             return
 
         if self._is_regular_target_message(message):
@@ -59,7 +59,7 @@ class ReputationCog(commands.Cog):
             prefixes = ()
         return not prefixes or not content.startswith(prefixes)
 
-    async def _handle_reputation_message(self, message: discord.Message, value: int, label: str) -> None:
+    async def _handle_reputation_message(self, message: discord.Message, value: int) -> None:
         if not self.bot.db:
             logger.warning("Reputation command ignored because database is not initialized")
             return
@@ -107,13 +107,42 @@ class ReputationCog(commands.Cog):
                 receiver.id,
             )
             total_rep = positive_rep - negative_rep
-            await message.channel.send(
-                f"{message.author.mention} поставил {label} {receiver.mention}\n"
-                f"У {receiver.mention} теперь: {total_rep} репутации"
-            )
+            await self._send_reputation_embed(message, receiver, value, total_rep)
         except Exception:
             logger.exception("Failed to process reputation message %s", message.id)
             await message.channel.send("Произошла ошибка при изменении репутации. Попробуйте позже.")
+
+    async def _send_reputation_embed(
+        self,
+        message: discord.Message,
+        receiver: discord.Member | discord.User,
+        value: int,
+        total_rep: int,
+    ) -> None:
+        is_positive = value > 0
+        change_text = "➕ Получена положительная репутация" if is_positive else "➖ Получена отрицательная репутация"
+        change_value = f"{value:+d}"
+        color = discord.Color.green() if is_positive else discord.Color.red()
+        phrases = self.bot.engagement_content.list("reputation_messages")
+        phrase = random.choice(phrases) if phrases else "💬 Репутация показывает доверие сообщества."
+
+        embed = discord.Embed(
+            title="╭──── ❤️ РЕПУТАЦИЯ ❤️ ────╮",
+            description=(
+                f"👤 {message.author.mention} оценил участника {receiver.mention}\n\n"
+                f"{change_text}\n\n"
+                f"📈 Изменение репутации: **{change_value}**\n\n"
+                f"⭐ Всего репутации: **{total_rep}**\n\n"
+                f"{phrase}\n\n"
+                "╰────────────────────────╯"
+            ),
+            color=color,
+        )
+        embed.set_thumbnail(url=receiver.display_avatar.url)
+        await message.channel.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     async def _resolve_target_message(self, message: discord.Message) -> discord.Message | None:
         reply_target = await self._resolve_reply_target(message)

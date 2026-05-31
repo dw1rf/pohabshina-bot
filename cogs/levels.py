@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from datetime import UTC, datetime
 
 import discord
@@ -33,7 +34,34 @@ class LevelsCog(commands.Cog):
             datetime.now(UTC),
         )
         if level_up:
-            await message.channel.send(f"🎉 {message.author.mention} достиг(ла) {level} уровня!")
+            await self._send_level_up_message(message, level)
+
+    async def _send_level_up_message(self, message: discord.Message, level: int) -> None:
+        content = self.bot.engagement_content
+        motivation = random.choice(content.list("levelup_messages"))
+        gifs = content.list("levelup_gifs")
+        gif_url = random.choice(gifs) if gifs else None
+
+        embed = discord.Embed(
+            title="╭──── ✦ LEVEL UP ✦ ────╮",
+            description=(
+                f"🎉 Поздравляем, {message.author.mention}!\n\n"
+                f"✨ Достигнут новый уровень: **{level}**\n\n"
+                f"{motivation}\n\n"
+                "╰──────────────────────╯"
+            ),
+            color=discord.Color.from_rgb(255, 128, 191),
+            timestamp=datetime.now(UTC),
+        )
+        embed.set_thumbnail(url=message.author.display_avatar.url)
+        if gif_url:
+            embed.set_image(url=gif_url)
+        embed.set_footer(text="Продолжай быть активным участником сервера")
+
+        await message.channel.send(
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     @app_commands.command(name="rank", description="Показать уровень пользователя")
     async def rank(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
@@ -97,7 +125,10 @@ class LevelsCog(commands.Cog):
             embed.set_image(url=f"attachment://{filename}")
         except Exception:
             logger.exception("Failed to generate levels top image")
-            await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
+            await interaction.followup.send(
+                "Не удалось создать графический топ. Попробуйте позже.",
+                ephemeral=True,
+            )
             return
 
         await interaction.followup.send(
