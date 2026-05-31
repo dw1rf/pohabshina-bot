@@ -105,7 +105,12 @@ DELETE_CONTROL_MESSAGES=false
 ALLOWED_USER_IDS=
 ALLOWED_ROLE_IDS=
 MOD_LOG_CHANNEL_ID=0
+DAILY_MESSAGE_CHANNEL_ID=0
+ENGAGEMENT_CONTENT_PATH=data/engagement_content.json
 ```
+
+- `DAILY_MESSAGE_CHANNEL_ID` — канал для автоматических сообщений в 08:00 и 00:00 по Москве (`0` = выключено).
+- `ENGAGEMENT_CONTENT_PATH` — JSON-файл с текстами, GIF и картинками для level up, репутации и ежедневных сообщений.
 
 ### Перевод / отображение
 

@@ -22,6 +22,7 @@ from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
 from services.social_game_service import SocialGameService
 from utils.command_localizations import RussianCommandNameTranslator
+from utils.engagement_content import EngagementContent, load_engagement_content
 from utils.voice_runtime import find_ffmpeg, log_voice_runtime
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class MovieBot(commands.Bot):
         self.reaction_roles = ReactionRoleService()
         self.support_tickets = SupportTicketService()
         self.social_games = SocialGameService()
+        self.engagement_content: EngagementContent = load_engagement_content(settings.engagement_content_path)
         self._extensions_bootstrapped = False
         self._support_category_logged = False
         self._last_mc_status_error: str | None = None
