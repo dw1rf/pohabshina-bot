@@ -68,6 +68,8 @@ class Settings:
     shop_channel_id: int
     ping_guard_delete_repeats: bool
     daily_message_channel_id: int
+    birthday_channel_id: int
+    timezone: str
     engagement_content_path: str
     level_cooldown_seconds: int = 15
     min_message_length: int = 2
@@ -110,6 +112,8 @@ def load_settings() -> Settings:
         shop_channel_id=int(os.getenv("SHOP_CHANNEL_ID", "0") or 0),
         ping_guard_delete_repeats=_parse_bool(os.getenv("PING_GUARD_DELETE_REPEATS", "false")),
         daily_message_channel_id=int(os.getenv("DAILY_MESSAGE_CHANNEL_ID", "0") or 0),
+        birthday_channel_id=int(os.getenv("BIRTHDAY_CHANNEL_ID", "0") or 0),
+        timezone=os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow",
         engagement_content_path=os.getenv("ENGAGEMENT_CONTENT_PATH", "data/engagement_content.json").strip()
         or "data/engagement_content.json",
     )
