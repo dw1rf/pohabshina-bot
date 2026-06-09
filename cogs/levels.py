@@ -18,6 +18,30 @@ logger = logging.getLogger(__name__)
 class LevelsCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
+        self._last_level_up_gif: str | None = None
+
+    def _get_random_level_up_text(self) -> str:
+        messages = self.bot.engagement_content.list("levelup_messages")
+        if not messages:
+            return "Ты отлично проявляешь себя в жизни сервера."
+        return random.choice(messages)
+
+    def _get_random_level_up_gif(self) -> str | None:
+        gifs = [
+            gif
+            for gif in self.bot.engagement_content.list("levelup_gifs")
+            if gif.startswith(("http://", "https://"))
+        ]
+        if not gifs:
+            return None
+        if len(gifs) == 1:
+            self._last_level_up_gif = gifs[0]
+            return gifs[0]
+
+        choices = [gif for gif in gifs if gif != self._last_level_up_gif]
+        gif_url = random.choice(choices or gifs)
+        self._last_level_up_gif = gif_url
+        return gif_url
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -37,10 +61,8 @@ class LevelsCog(commands.Cog):
             await self._send_level_up_message(message, level)
 
     async def _send_level_up_message(self, message: discord.Message, level: int) -> None:
-        content = self.bot.engagement_content
-        motivation = random.choice(content.list("levelup_messages"))
-        gifs = content.list("levelup_gifs")
-        gif_url = random.choice(gifs) if gifs else None
+        motivation = self._get_random_level_up_text()
+        gif_url = self._get_random_level_up_gif()
 
         embed = discord.Embed(
             title="╭──── ✦ LEVEL UP ✦ ────╮",
