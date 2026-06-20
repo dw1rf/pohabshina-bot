@@ -121,7 +121,7 @@ ENGAGEMENT_CONTENT_PATH=data/engagement_content.json
 - `/др установить день:<1-31> месяц:<1-12> год:<необязательно>` — сохранить или обновить свою дату рождения.
 - `/др посмотреть` — показать свою сохраненную дату.
 - `/др удалить` — удалить свою дату рождения.
-- `/др список` — ближайшие дни рождения для модераторов с правом Manage Server, без отображения годов рождения.
+- `/др список` — ближайшие дни рождения, без отображения годов рождения.
 
 Бот проверяет дни рождения каждый час после 09:00 в `TIMEZONE` и пишет поздравления в `BIRTHDAY_CHANNEL_ID`. Таблица `birthdays` создается автоматически в SQLite (`SQLITE_PATH`), а `last_congratulated_date` защищает от повторных поздравлений после перезапуска.
 
@@ -219,7 +219,7 @@ AI не является модератором: он не должен само
 ### AI `.env`
 
 ```env
-AI_PROVIDER=gemini
+AI_PROVIDER=groq
 AI_PERSONA=pohab_npc
 AI_RANDOM_REPLY_CHANCE=0.04
 AI_GLOBAL_COOLDOWN_SECONDS=60
@@ -238,9 +238,9 @@ AI_MAX_OUTPUT_TOKENS=500
 AI_TEMPERATURE=0.75
 
 GEMINI_API_KEY=
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-2.5-pro
 GROQ_API_KEY=
-GROQ_MODEL=openai/gpt-oss-20b
+GROQ_MODEL=openai/gpt-oss-120b
 GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=gemma3
@@ -250,7 +250,7 @@ OLLAMA_MODEL=gemma3
 
 | Переменная | По умолчанию | Что делает |
 | --- | --- | --- |
-| `AI_PROVIDER` | `gemini` | Выбирает backend генерации: `gemini`, `groq` или `ollama`. |
+| `AI_PROVIDER` | `groq` | Выбирает backend генерации: `gemini`, `groq` или `ollama`. |
 | `AI_PERSONA` | `pohab_npc` | Имя режима персонажа для статуса и конфигурации. Логика prompt сейчас живёт в `AIPersonaService`. |
 | `AI_RANDOM_REPLY_CHANCE` | `0.04` | Вероятность редкой самостоятельной реплики на обычное сообщение в AI-канале. `0.04` = примерно 4%, но cooldown всё равно ограничивает ответы. |
 | `AI_GLOBAL_COOLDOWN_SECONDS` | `60` | Минимальная пауза между AI-ответами на всём сервере. Главная защита от сжигания Groq Free. |
@@ -268,9 +268,9 @@ OLLAMA_MODEL=gemma3
 | `AI_MAX_OUTPUT_TOKENS` | `500` | Лимит генерации ответа у AI provider. |
 | `AI_TEMPERATURE` | `0.75` | Температура генерации. Выше = более хаотичный стиль, ниже = суше и стабильнее. |
 | `GEMINI_API_KEY` | пусто | Ключ Gemini, если `AI_PROVIDER=gemini`. |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Модель Gemini. |
+| `GEMINI_MODEL` | `gemini-2.5-pro` | Модель Gemini. |
 | `GROQ_API_KEY` | пусто | Ключ Groq, если `AI_PROVIDER=groq` или используется `/ai image_describe`. |
-| `GROQ_MODEL` | `openai/gpt-oss-20b` | Текстовая модель Groq. |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Текстовая модель Groq. |
 | `GROQ_VISION_MODEL` | `meta-llama/llama-4-scout-17b-16e-instruct` | Vision-модель Groq для `/ai image_describe`. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | URL локального Ollama API, если `AI_PROVIDER=ollama`. |
 | `OLLAMA_MODEL` | `gemma3` | Локальная модель Ollama. |

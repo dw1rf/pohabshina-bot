@@ -195,13 +195,9 @@ class BirthdaysCog(commands.Cog):
         )
 
     @birthday_group.command(name="список", description="Показать ближайшие дни рождения")
-    @app_commands.default_permissions(manage_guild=True)
     async def list_birthdays(self, interaction: discord.Interaction) -> None:
         if interaction.guild is None or self.bot.db is None:
             await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
-            return
-        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("Эта команда доступна только модераторам.", ephemeral=True)
             return
 
         rows = await self._fetch_all_birthdays()

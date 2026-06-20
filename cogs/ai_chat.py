@@ -208,7 +208,7 @@ async def _generate_gemini_response(system_prompt: str, user_prompt: str, config
         logger.error("AI_PROVIDER=gemini, but GEMINI_API_KEY is not configured")
         return "Gemini API не настроен: добавьте GEMINI_API_KEY в .env."
 
-    model = _env("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash"
+    model = _env("GEMINI_MODEL", "gemini-2.5-pro") or "gemini-2.5-pro"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -285,7 +285,7 @@ async def _generate_groq_response(system_prompt: str, user_prompt: str, config: 
         logger.error("AI_PROVIDER=groq, but GROQ_API_KEY is not configured")
         return "Groq API не настроен: добавьте GROQ_API_KEY в .env."
 
-    model = _env("GROQ_MODEL", "openai/gpt-oss-20b") or "openai/gpt-oss-20b"
+    model = _env("GROQ_MODEL", "openai/gpt-oss-120b") or "openai/gpt-oss-120b"
     url = "https://api.groq.com/openai/v1/responses"
     payload = {
         "model": model,
@@ -319,7 +319,7 @@ async def _generate_groq_response(system_prompt: str, user_prompt: str, config: 
 
 
 async def generate_ai_response(system_prompt: str, user_prompt: str, config: AIRuntimeConfig) -> str:
-    provider = (_env("AI_PROVIDER", "gemini") or "gemini").lower()
+    provider = (_env("AI_PROVIDER", "groq") or "groq").lower()
     if provider == "gemini":
         return await _generate_gemini_response(system_prompt, user_prompt, config)
     if provider == "groq":
@@ -1112,7 +1112,7 @@ class AIChatCog(commands.Cog):
             config.enable_reactions,
         )
         text = (
-            f"AI_PROVIDER: `{_env('AI_PROVIDER', 'gemini')}`\n"
+            f"AI_PROVIDER: `{_env('AI_PROVIDER', 'groq')}`\n"
             f"AI_PERSONA: `{config.persona}`\n"
             f"daily usage: `{usage}/{config.daily_limit}`\n"
             f"random replies: `{random_enabled}`\n"
