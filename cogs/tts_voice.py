@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.tts_text_filter import filter_tts_text, format_removed_words
 from utils.voice_runtime import FFMPEG_MISSING_MESSAGE, find_ffmpeg, require_ffmpeg
 
 try:
@@ -30,6 +31,7 @@ MESSAGE_COOLDOWN_SECONDS = 1.5
 MAX_QUEUE_SIZE = 10
 MAX_TTS_PART_LENGTH = 200
 MAX_TTS_PARTS_PER_MESSAGE = 5
+MAX_REMOVED_REPORT_LENGTH = 300
 TTS_SYNTH_RETRIES = 3
 DEFAULT_VOICE = "ru-RU-SvetlanaNeural"
 COMMAND_PREFIXES = ("/", "!", ".", "?", "+", "-")
@@ -52,6 +54,7 @@ class TTSItem:
     text: str
     display_text: str
     author_name: str
+    removed_words: tuple[str, ...] = ()
     source_message_id: int | None = None
     send_file: bool = True
 
@@ -82,6 +85,15 @@ def _compact(text: str, limit: int = 180) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 1].rstrip() + "…"
+
+
+def _build_tts_caption(author_name: str, display_text: str, removed_words: tuple[str, ...] = ()) -> str:
+    escaped_author = discord.utils.escape_markdown(author_name)
+    caption = f"🔊 **{escaped_author}:** {_compact(display_text)}"
+    if removed_words:
+        report = _compact(format_removed_words(removed_words), limit=MAX_REMOVED_REPORT_LENGTH)
+        caption += f"\n🧹 Убрано: {discord.utils.escape_markdown(report)}"
+    return caption
 
 
 def _strip_unicode_symbols(text: str) -> str:
@@ -243,6 +255,7 @@ class TTSVoiceCog(commands.Cog):
                 "Один раз включи — бот читает только твои сообщения.\n"
                 "Пока озвучка включена, только ты можешь пользоваться ботом в этом голосе.\n\n"
                 "• Не читает эмодзи, стикеры, спам и команды\n"
+                "• Убирает слова-паразиты и соседние повторы\n"
                 "• Быстрые сообщения встают в очередь\n"
                 "• Длинный текст — до 200 символов за часть\n"
                 "• Бот не выйдет, пока ты в голосе с включённой озвучкой"
@@ -401,7 +414,7 @@ class TTSVoiceCog(commands.Cog):
             return
         try:
             await channel.send(
-                content=f"🔊 **{discord.utils.escape_markdown(item.author_name)}:** {_compact(item.display_text)}",
+                content=_build_tts_caption(item.author_name, item.display_text, item.removed_words),
                 file=discord.File(file_path, filename="tts.mp3"),
                 allowed_mentions=discord.AllowedMentions.none(),
                 reference=discord.MessageReference(
@@ -464,12 +477,13 @@ class TTSVoiceCog(commands.Cog):
         source_message_id: int | None = None,
         send_file: bool = True,
     ) -> int:
-        cleaned = clean_tts_text(text)
-        if not cleaned:
+        sanitized = clean_tts_text(text)
+        if not sanitized:
             return 0
-        parts = split_tts_text(cleaned)[:MAX_TTS_PARTS_PER_MESSAGE]
+        filtered = filter_tts_text(sanitized)
+        parts = split_tts_text(filtered.cleaned_text)[:MAX_TTS_PARTS_PER_MESSAGE]
         queued = 0
-        for part in parts:
+        for part_index, part in enumerate(parts):
             if session.queue.full():
                 logger.warning("TTS queue overflow: guild=%s owner=%s", session.guild_id, session.owner_id)
                 break
@@ -478,6 +492,7 @@ class TTSVoiceCog(commands.Cog):
                     text=part,
                     display_text=part,
                     author_name=author_name,
+                    removed_words=filtered.removed_words if part_index == 0 else (),
                     source_message_id=source_message_id,
                     send_file=send_file,
                 )
@@ -621,21 +636,26 @@ class TTSVoiceCog(commands.Cog):
         voice_client = await self.ensure_voice_client(interaction)
         if voice_client is None:
             return
-        cleaned = clean_tts_text(text)
-        parts = split_tts_text(cleaned)
+        sanitized = clean_tts_text(text)
+        filtered = filter_tts_text(sanitized)
+        parts = split_tts_text(filtered.cleaned_text)
         if not parts:
             await interaction.followup.send("После очистки текста нечего озвучивать.", ephemeral=True)
             return
 
         temp_files: list[Path] = []
         try:
-            for part in parts[:MAX_QUEUE_SIZE]:
+            for part_index, part in enumerate(parts[:MAX_QUEUE_SIZE]):
                 file_path = await self.synthesize_to_file(None, part, DEFAULT_VOICE)
                 temp_files.append(file_path)
                 if isinstance(interaction.channel, (discord.TextChannel, discord.Thread)):
                     try:
                         await interaction.channel.send(
-                            content=f"🔊 **{discord.utils.escape_markdown(interaction.user.display_name)}:** {_compact(part)}",
+                            content=_build_tts_caption(
+                                interaction.user.display_name,
+                                part,
+                                filtered.removed_words if part_index == 0 else (),
+                            ),
                             file=discord.File(file_path, filename="tts.mp3"),
                             allowed_mentions=discord.AllowedMentions.none(),
                         )
