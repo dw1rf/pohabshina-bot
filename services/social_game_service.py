@@ -17,6 +17,11 @@ class SocialGameService:
     async def init_db(self, db: aiosqlite.Connection) -> None:
         await db.executescript(
             """
+            CREATE TABLE IF NOT EXISTS social_schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
                 nsfw_rp_enabled INTEGER NOT NULL DEFAULT 0,
@@ -35,6 +40,16 @@ class SocialGameService:
                 nsfw_rp_opt_in INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS rp_action_counters (
+                guild_id INTEGER NOT NULL,
+                actor_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                action_key TEXT NOT NULL,
+                action_count INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, actor_id, target_id, action_key)
             );
 
             CREATE TABLE IF NOT EXISTS user_privacy_settings (
@@ -200,7 +215,79 @@ class SocialGameService:
         )
         await self._migrate_privacy_defaults(db)
         await self._migrate_activity_schema(db)
+        await self._migrate_pet_battles(db)
+        await self._migrate_club_communities(db)
+        await db.execute(
+            "INSERT OR IGNORE INTO social_schema_migrations(name, applied_at) VALUES ('social_games_v2', ?)",
+            (utcnow_iso(),),
+        )
         await db.commit()
+
+    async def _migrate_pet_battles(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(pets)")
+        columns = {str(row["name"] if isinstance(row, aiosqlite.Row) else row[1]) for row in await cursor.fetchall()}
+        additions = {
+            "attack": "ALTER TABLE pets ADD COLUMN attack INTEGER NOT NULL DEFAULT 10",
+            "defense": "ALTER TABLE pets ADD COLUMN defense INTEGER NOT NULL DEFAULT 10",
+            "speed": "ALTER TABLE pets ADD COLUMN speed INTEGER NOT NULL DEFAULT 10",
+            "rating": "ALTER TABLE pets ADD COLUMN rating INTEGER NOT NULL DEFAULT 1000",
+            "wins": "ALTER TABLE pets ADD COLUMN wins INTEGER NOT NULL DEFAULT 0",
+            "losses": "ALTER TABLE pets ADD COLUMN losses INTEGER NOT NULL DEFAULT 0",
+            "last_adventure_at": "ALTER TABLE pets ADD COLUMN last_adventure_at TEXT",
+        }
+        for column, sql in additions.items():
+            if column not in columns:
+                await db.execute(sql)
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS pet_inventory (
+                guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, item_key TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+                PRIMARY KEY(guild_id, owner_id, item_key)
+            );
+            CREATE TABLE IF NOT EXISTS pet_battles (
+                battle_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+                attacker_id INTEGER NOT NULL, defender_id INTEGER NOT NULL, winner_id INTEGER NOT NULL,
+                rating_delta INTEGER NOT NULL, battle_type TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            """
+        )
+
+    async def _migrate_club_communities(self, db: aiosqlite.Connection) -> None:
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS club_communities (
+                club_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL,
+                name TEXT NOT NULL, bank INTEGER NOT NULL DEFAULT 0 CHECK(bank >= 0),
+                skill_level INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(guild_id, owner_id)
+            );
+            CREATE TABLE IF NOT EXISTS club_members (
+                club_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member', joined_at TEXT NOT NULL,
+                PRIMARY KEY(club_id, user_id), UNIQUE(guild_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS club_applications (
+                club_id INTEGER NOT NULL, user_id INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(club_id, user_id)
+            );
+            CREATE TABLE IF NOT EXISTS club_community_inventory (
+                club_id INTEGER NOT NULL, item_id INTEGER NOT NULL, quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity >= 0),
+                PRIMARY KEY(club_id, item_id)
+            );
+            """
+        )
+        now = utcnow_iso()
+        await db.execute(
+            """INSERT OR IGNORE INTO club_communities(guild_id, owner_id, name, bank, skill_level, created_at, updated_at)
+               SELECT guild_id, owner_id, name, MAX(coins_earned, 0), MAX(level, 1), created_at, updated_at FROM club_profiles"""
+        )
+        await db.execute(
+            """INSERT OR IGNORE INTO club_members(club_id, guild_id, user_id, role, joined_at)
+               SELECT club_id, guild_id, owner_id, 'leader', ? FROM club_communities""",
+            (now,),
+        )
 
     async def _migrate_activity_schema(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(user_activity_aggregates)")
@@ -399,6 +486,7 @@ class SocialGameService:
     async def forget_user(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> None:
         for table, column in (
             ("user_privacy_settings", "user_id"), ("rp_consent_settings", "user_id"),
+            ("rp_action_counters", "actor_id"),
             ("user_activity_aggregates", "user_id"), ("user_message_samples", "user_id"),
             ("user_weekly_style_stats", "user_id"), ("user_social_edges", "user_id"),
             ("social_edges", "user_id"), ("pets", "owner_id"), ("pet_actions", "owner_id"),
@@ -407,6 +495,7 @@ class SocialGameService:
             await db.execute(f"DELETE FROM {table} WHERE guild_id = ? AND {column} = ?", (guild_id, user_id))
         await db.execute("DELETE FROM user_social_edges WHERE guild_id = ? AND other_user_id = ?", (guild_id, user_id))
         await db.execute("DELETE FROM social_edges WHERE guild_id = ? AND target_user_id = ?", (guild_id, user_id))
+        await db.execute("DELETE FROM rp_action_counters WHERE guild_id = ? AND target_id = ?", (guild_id, user_id))
         await db.commit()
 
     async def set_rp_consent(self, db: aiosqlite.Connection, guild_id: int, user_id: int, *, sfw: bool | None = None, nsfw: bool | None = None) -> None:
@@ -430,6 +519,22 @@ class SocialGameService:
         cur = await db.execute("SELECT rp_opt_in, nsfw_rp_opt_in FROM rp_consent_settings WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         row = await cur.fetchone()
         return bool(row and row["rp_opt_in"] and (not nsfw or row["nsfw_rp_opt_in"]))
+
+    async def increment_rp_action(self, db: aiosqlite.Connection, guild_id: int, actor_id: int, target_id: int, action_key: str) -> int:
+        await db.execute(
+            """INSERT INTO rp_action_counters(guild_id, actor_id, target_id, action_key, action_count, updated_at)
+               VALUES (?, ?, ?, ?, 1, ?)
+               ON CONFLICT(guild_id, actor_id, target_id, action_key) DO UPDATE SET
+               action_count=action_count+1, updated_at=excluded.updated_at""",
+            (guild_id, actor_id, target_id, action_key, utcnow_iso()),
+        )
+        await db.commit()
+        cur = await db.execute(
+            "SELECT action_count FROM rp_action_counters WHERE guild_id=? AND actor_id=? AND target_id=? AND action_key=?",
+            (guild_id, actor_id, target_id, action_key),
+        )
+        row = await cur.fetchone()
+        return int(row["action_count"] if row else 1)
 
     async def seed_story_scenes(self, db: aiosqlite.Connection, scenes: list[dict[str, Any]]) -> None:
         for scene in scenes:

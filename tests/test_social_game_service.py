@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import unittest
+import json
+from pathlib import Path
 
 import aiosqlite
 
@@ -78,6 +80,42 @@ class SocialGameServiceTests(unittest.TestCase):
         self.assertIn("прижать_к_стенке", RP_ACTIONS)
         self.assertIn("французский_поцелуй", RP_ACTIONS)
         self.assertTrue(all("text" in payload and "label" in payload for payload in RP_ACTIONS.values()))
+
+    def test_sfw_manifest_contains_more_than_sixty_actions(self) -> None:
+        manifest_path = Path(__file__).resolve().parents[1] / "data" / "roleplay_sfw.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        actions = manifest["actions"]
+        self.assertGreaterEqual(len(actions), 60)
+        self.assertTrue(all(len(values) == 3 for values in actions.values()))
+
+    def test_pet_and_club_migration_preserves_existing_profiles(self) -> None:
+        async def scenario() -> None:
+            db = await aiosqlite.connect(":memory:")
+            db.row_factory = aiosqlite.Row
+            service = SocialGameService()
+            await service.init_db(db)
+            await db.execute(
+                """INSERT INTO pets(guild_id, owner_id, name, type, level, xp, created_at, updated_at)
+                   VALUES (1, 42, 'Искра', 'лиса', 7, 33, '2026-01-01', '2026-01-01')"""
+            )
+            await db.execute(
+                """INSERT INTO club_profiles(guild_id, owner_id, name, level, coins_earned, created_at, updated_at)
+                   VALUES (1, 42, 'Ночные', 5, 900, '2026-01-01', '2026-01-01')"""
+            )
+            await db.commit()
+            await service.init_db(db)
+            cursor = await db.execute("SELECT name, level, rating FROM pets WHERE guild_id=1 AND owner_id=42")
+            pet = await cursor.fetchone()
+            self.assertEqual((pet["name"], pet["level"], pet["rating"]), ("Искра", 7, 1000))
+            cursor = await db.execute(
+                """SELECT c.name, c.bank, m.role FROM club_communities c
+                   JOIN club_members m ON m.club_id=c.club_id WHERE c.guild_id=1 AND c.owner_id=42"""
+            )
+            community = await cursor.fetchone()
+            self.assertEqual((community["name"], community["bank"], community["role"]), ("Ночные", 900, "leader"))
+            await db.close()
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

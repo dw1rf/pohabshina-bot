@@ -8,3 +8,6 @@ cookies/
 youtube-cookies.txt
 *.cookies.txt
 scookies/youtube-cookies.txt
+data/*.db
+data/*.sqlite3
+data/backups/

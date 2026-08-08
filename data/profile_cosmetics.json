@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "cosmetics": [
+    {"type": "background", "key": "levels", "name": "Ночной город"},
+    {"type": "background", "key": "events", "name": "Сезонная ночь"},
+    {"type": "background", "key": "pets", "name": "Территория питомцев"},
+    {"type": "background", "key": "relationships", "name": "Два сердца"},
+    {"type": "background", "key": "clubs", "name": "Клубный зал"},
+    {"type": "accent", "key": "rose", "name": "Пыльная роза"},
+    {"type": "accent", "key": "plum", "name": "Тёмная слива"},
+    {"type": "accent", "key": "gold", "name": "Матовое золото"},
+    {"type": "badge", "key": "voice", "name": "Голос сервера"},
+    {"type": "badge", "key": "champion", "name": "Чемпион"},
+    {"type": "badge", "key": "idea", "name": "Автор идеи"},
+    {"type": "badge", "key": "season_one", "name": "Первый сезон"}
+  ]
+}

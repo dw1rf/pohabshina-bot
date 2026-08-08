@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.brand import BRAND_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +128,11 @@ class QuickHelpCog(commands.Cog):
 
     def how_embed(self) -> discord.Embed:
         return discord.Embed(
-            title="Быстрая помощь",
-            description="Выбери нужный раздел кнопкой ниже.",
+            title=f"{BRAND_NAME} · быстрая помощь",
+            description=(
+                "Выбери нужный раздел кнопкой ниже. Игровые команды: `/rank`, `/top`, `/economy`, "
+                "`/bank`, `/inventory`, `/shop`, `/market`, `/pet`, `/community`, `/wedding`, `/rp`."
+            ),
             color=discord.Color.blurple(),
         )
 

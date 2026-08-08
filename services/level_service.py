@@ -96,7 +96,9 @@ class LevelService:
         await db.execute("DELETE FROM warning_totals WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
         await db.commit()
 
-    async def update_level_progress(self, db: aiosqlite.Connection, guild_id: int, user_id: int, message_ts: datetime) -> tuple[int, int, bool]:
+    async def update_level_progress(
+        self, db: aiosqlite.Connection, guild_id: int, user_id: int, message_ts: datetime
+    ) -> tuple[int, int, bool, bool]:
         cursor = await db.execute(
             "SELECT message_count, level, last_message_at FROM levels WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id),
@@ -111,13 +113,13 @@ class LevelService:
                 (guild_id, user_id, message_count, new_level, message_ts.isoformat()),
             )
             await db.commit()
-            return message_count, new_level, new_level > 0
+            return message_count, new_level, new_level > 0, True
 
         if row["last_message_at"]:
             try:
                 last_dt = datetime.fromisoformat(row["last_message_at"])
                 if (message_ts - last_dt).total_seconds() < self.settings.level_cooldown_seconds:
-                    return int(row["message_count"]), int(row["level"]), False
+                    return int(row["message_count"]), int(row["level"]), False, False
             except ValueError:
                 pass
 
@@ -129,7 +131,7 @@ class LevelService:
             (message_count, new_level, message_ts.isoformat(), guild_id, user_id),
         )
         await db.commit()
-        return message_count, new_level, new_level > old_level
+        return message_count, new_level, new_level > old_level, True
 
     async def get_rank(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> aiosqlite.Row | None:
         cursor = await db.execute(
@@ -137,6 +139,22 @@ class LevelService:
             (guild_id, user_id),
         )
         return await cursor.fetchone()
+
+    async def get_rank_position(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> int:
+        row = await self.get_rank(db, guild_id, user_id)
+        if row is None:
+            return 0
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*) + 1 AS position
+            FROM levels
+            WHERE guild_id = ?
+              AND (level > ? OR (level = ? AND message_count > ?))
+            """,
+            (guild_id, int(row["level"]), int(row["level"]), int(row["message_count"])),
+        )
+        result = await cursor.fetchone()
+        return int(result["position"] if result else 1)
 
     async def get_top(self, db: aiosqlite.Connection, guild_id: int, limit: int = 10) -> list[aiosqlite.Row]:
         cursor = await db.execute(

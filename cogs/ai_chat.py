@@ -124,7 +124,7 @@ def _env_float(name: str, default: float, *, minimum: float | None = None, maxim
 
 
 def _env_aliases() -> tuple[str, ...]:
-    raw = _env("AI_BOT_ALIASES", "мурка,бот,пахабщина,пахаб")
+    raw = _env("AI_BOT_ALIASES", "vulgarities,vulgarities bot,бот,пахабщина,пахаб")
     aliases = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
     return aliases or ("бот",)
 

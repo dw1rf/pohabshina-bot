@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "achievements": [
+    {"key": "first_words", "name": "Первые слова", "event_type": "message", "threshold": 1, "reward_coins": 25},
+    {"key": "voice_of_server", "name": "Голос сервера", "event_type": "message", "threshold": 100, "reward_coins": 250, "cosmetic_type": "badge", "cosmetic_key": "voice"},
+    {"key": "night_owl", "name": "Ночная сова", "event_type": "message_night", "threshold": 25, "reward_coins": 120, "hidden": true},
+    {"key": "worker", "name": "Работяга", "event_type": "economy_action", "threshold": 25, "reward_coins": 300},
+    {"key": "roleplayer", "name": "В центре истории", "event_type": "rp_action", "threshold": 50, "reward_coins": 250, "cosmetic_type": "background", "cosmetic_key": "relationships"},
+    {"key": "pet_friend", "name": "Друг питомцев", "event_type": "pet_adventure", "threshold": 10, "reward_coins": 200},
+    {"key": "pet_champion", "name": "Чемпион арены", "event_type": "pet_win", "threshold": 20, "reward_coins": 500, "cosmetic_type": "badge", "cosmetic_key": "champion"},
+    {"key": "club_builder", "name": "Опора клуба", "event_type": "club_contribution", "threshold": 50, "reward_coins": 350},
+    {"key": "together", "name": "Вместе сильнее", "event_type": "relationship_xp", "threshold": 100, "reward_coins": 300, "cosmetic_type": "background", "cosmetic_key": "relationships"},
+    {"key": "bright_idea", "name": "Светлая идея", "event_type": "suggestion_accepted", "threshold": 1, "reward_coins": 500, "cosmetic_type": "badge", "cosmetic_key": "idea"},
+    {"key": "star", "name": "Звезда сервера", "event_type": "starboard_post", "threshold": 5, "reward_coins": 300, "cosmetic_type": "accent", "cosmetic_key": "gold"},
+    {"key": "boss_hunter", "name": "Охотник на боссов", "event_type": "pet_boss", "threshold": 5, "reward_coins": 600, "cosmetic_type": "background", "cosmetic_key": "pets"}
+  ]
+}
