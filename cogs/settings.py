@@ -5,6 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.brand import BRAND_NAME
 
 
 def enabled_text(value: bool) -> str:
@@ -18,7 +19,7 @@ class SettingsCog(commands.Cog):
     async def _settings(self, guild_id: int) -> discord.Embed:
         assert self.bot.db is not None
         row = await self.bot.social_games.ensure_guild_settings(self.bot.db, guild_id)
-        embed = discord.Embed(title="Настройки бота", color=discord.Color.blurple())
+        embed = discord.Embed(title=f"Настройки {BRAND_NAME}", color=discord.Color.blurple())
         embed.add_field(name="NSFW RP", value=enabled_text(bool(row["nsfw_rp_enabled"])), inline=True)
         embed.add_field(name="Аналитика профилей", value=enabled_text(bool(row["profile_analytics_enabled"])), inline=True)
         embed.add_field(name="Matchmaking", value=enabled_text(bool(row["matchmaking_enabled"])), inline=True)
@@ -70,6 +71,17 @@ class SettingsCog(commands.Cog):
             return
         await self.bot.social_games.set_guild_flag(self.bot.db, interaction.guild.id, "log_channel_id", channel.id)
         await interaction.response.send_message(f"Лог-канал установлен: {channel.mention}.", ephemeral=True)
+
+    @app_commands.command(name="set_adult_role", description="Задать обязательную роль для NSFW RP")
+    @app_commands.default_permissions(administrator=True)
+    async def set_adult_role(self, interaction: discord.Interaction, role: discord.Role | None = None) -> None:
+        if interaction.guild is None or self.bot.db is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        await self.bot.social_games.set_guild_flag(self.bot.db, interaction.guild.id, "adult_role_id", role.id if role else 0)
+        await interaction.response.send_message(
+            f"18+ роль: {role.mention if role else 'отключена'}.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
 
 
 

@@ -406,7 +406,7 @@ class ModerationCog(commands.Cog):
         remaining = _parse_iso(record.expires_at) - _utcnow()
         await self._safe_reply(interaction, f"⏳ Осталось времени: {_format_remaining(remaining)}")
 
-    @app_commands.command(name="rules", description="Показать правила сервера")
+    @app_commands.command(name="publish_rules", description="Показать правила сервера")
     @app_commands.default_permissions(manage_guild=True)
     async def rules(self, interaction: discord.Interaction) -> None:
         guild = self._guild(interaction)

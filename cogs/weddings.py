@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+import sqlite3
+from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -12,11 +14,12 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
-from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
+from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, make_profile_file, resolve_avatar_bytes, resolve_display_name
 
 logger = logging.getLogger(__name__)
 
 WEDDINGS_DB_PATH = Path("data") / "weddings.db"
+WEDDING_GAMEPLAY_MIGRATION = "relationship_gameplay_v3"
 PROPOSAL_TTL = timedelta(minutes=5)
 WEDDING_COLOR = discord.Color.from_rgb(255, 105, 180)
 GOLD_COLOR = discord.Color.gold()
@@ -39,6 +42,23 @@ RELATIONSHIP_ACTIONS: dict[str, dict[str, Any]] = {
     "hug": {"title": "🤗 Объятия", "xp": 5, "cooldown": timedelta(minutes=30)},
     "kiss": {"title": "💋 Поцелуй", "xp": 5, "cooldown": timedelta(minutes=30)},
 }
+RELATIONSHIP_MILESTONES: tuple[tuple[str, str, int, int], ...] = (
+    ("days_7", "Неделя вместе", 7, 100),
+    ("days_30", "Месяц вместе", 30, 250),
+    ("days_365", "Год вместе", 365, 1000),
+    ("xp_100", "Первая близость", 100, 100),
+    ("xp_500", "Крепкая связь", 500, 300),
+    ("xp_1500", "Родственные души", 1500, 750),
+)
+
+
+def eligible_relationship_milestones(xp: int, days: int) -> list[str]:
+    keys: list[str] = []
+    for key, _, threshold, _ in RELATIONSHIP_MILESTONES:
+        value = days if key.startswith("days_") else xp
+        if value >= threshold:
+            keys.append(key)
+    return keys
 
 
 def calculate_relationship_level(xp: int) -> int:
@@ -86,7 +106,7 @@ def _format_timedelta_ru(delta: timedelta) -> str:
 
 
 def utcnow() -> datetime:
-    return datetime.utcnow()
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def to_iso(value: datetime | None = None) -> str:
@@ -107,12 +127,39 @@ def days_together(married_at: str) -> int:
     return max(delta.days, 0)
 
 
+def backup_weddings_before_gameplay_migration(db_path: Path) -> Path | None:
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        return None
+    with closing(sqlite3.connect(db_path)) as source:
+        migrations = source.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='wedding_schema_migrations'"
+        ).fetchone()
+        if migrations is not None:
+            applied = source.execute(
+                "SELECT 1 FROM wedding_schema_migrations WHERE name=?",
+                (WEDDING_GAMEPLAY_MIGRATION,),
+            ).fetchone()
+            if applied is not None:
+                return None
+        backup_dir = db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = backup_dir / f"{db_path.stem}-pre-gameplay-{stamp}{db_path.suffix}"
+        with closing(sqlite3.connect(backup_path)) as target:
+            source.backup(target)
+    return backup_path
+
+
 async def init_weddings_db(db_path: Path = WEDDINGS_DB_PATH) -> aiosqlite.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_weddings_before_gameplay_migration(db_path)
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys = ON")
     await db.execute("PRAGMA journal_mode = WAL")
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS wedding_schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+    )
     await db.execute(
         """
         CREATE TABLE IF NOT EXISTS wedding_marriages (
@@ -180,6 +227,43 @@ async def init_weddings_db(db_path: Path = WEDDINGS_DB_PATH) -> aiosqlite.Connec
             created_at TEXT NOT NULL
         )
         """
+    )
+    await db.execute(
+        "INSERT OR IGNORE INTO wedding_schema_migrations(name, applied_at) VALUES ('relationships_v2', ?)",
+        (to_iso(),),
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS relationship_quest_claims (
+            guild_id INTEGER NOT NULL,
+            marriage_id INTEGER NOT NULL,
+            quest_key TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, marriage_id, quest_key)
+        )
+        """
+    )
+    await db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS relationship_gift_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL, marriage_id INTEGER NOT NULL, giver_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL, quantity INTEGER NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS relationship_milestone_claims (
+            guild_id INTEGER NOT NULL, marriage_id INTEGER NOT NULL, milestone_key TEXT NOT NULL,
+            claimed_at TEXT NOT NULL, PRIMARY KEY(guild_id, marriage_id, milestone_key)
+        );
+        CREATE TABLE IF NOT EXISTS relationship_collectibles (
+            guild_id INTEGER NOT NULL, marriage_id INTEGER NOT NULL, collectible_key TEXT NOT NULL,
+            source TEXT NOT NULL, unlocked_at TEXT NOT NULL,
+            PRIMARY KEY(guild_id, marriage_id, collectible_key)
+        );
+        """
+    )
+    await db.execute(
+        "INSERT OR IGNORE INTO wedding_schema_migrations(name, applied_at) VALUES (?, ?)",
+        (WEDDING_GAMEPLAY_MIGRATION, to_iso()),
     )
     await db.execute(
         """
@@ -613,6 +697,22 @@ class WeddingsCog(commands.Cog):
                     )
 
                 await db.commit()
+                if self.bot.db is not None and updated is not None and actual_xp > 0:
+                    try:
+                        log_row = await (await db.execute(
+                            """SELECT id FROM relationship_xp_logs
+                               WHERE guild_id=? AND marriage_id=? AND actor_id=? AND action=?
+                               ORDER BY id DESC LIMIT 1""",
+                            (guild_id, marriage_id, actor.id, action),
+                        )).fetchone()
+                        if log_row is not None:
+                            await self.bot.progression.record_event(
+                                self.bot.progression_db, guild_id, actor.id, "relationship_xp", actual_xp,
+                                f"relationship-log:{int(log_row['id'])}",
+                                metadata={"marriage_id": marriage_id, "action": action},
+                            )
+                    except Exception:
+                        logger.exception("Failed to project relationship progress: marriage=%s", marriage_id)
                 return updated, None, old_level, new_level, actual_xp
             except Exception:
                 await db.rollback()
@@ -740,7 +840,7 @@ class WeddingsCog(commands.Cog):
 
     async def build_relationship_top_payload(
         self, guild_id: int
-    ) -> tuple[discord.Embed, discord.File] | None:
+    ) -> discord.File | None:
         rows = await self.get_relationship_top_rows(guild_id)
         if not rows:
             return None
@@ -750,6 +850,7 @@ class WeddingsCog(commands.Cog):
         for row in rows:
             proposer_name = await resolve_display_name(self.bot, guild, int(row["proposer_id"]), max_len=28)
             partner_name = await resolve_display_name(self.bot, guild, int(row["partner_id"]), max_len=28)
+            avatar = await resolve_avatar_bytes(self.bot, guild, int(row["proposer_id"]))
             level = int(row["relationship_level"] or 1)
             xp = int(row["relationship_xp"] or 0)
             streak = int(row["relationship_streak_days"] or 0)
@@ -759,14 +860,12 @@ class WeddingsCog(commands.Cog):
                     primary=f"Уровень {level}  XP {xp}",
                     secondary=f"Серия {streak} дн.",
                     value=xp,
+                    avatar=avatar,
                 )
             )
 
         filename = "relationship_top.png"
-        file = make_leaderboard_file("ТОП ОТНОШЕНИЙ", leaderboard_rows, filename=filename)
-        embed = discord.Embed(title="Топ отношений", color=GOLD_COLOR, timestamp=utcnow())
-        embed.set_image(url=f"attachment://{filename}")
-        return embed, file
+        return make_leaderboard_file("ТОП ОТНОШЕНИЙ", leaderboard_rows, filename=filename, theme="relationships")
 
     async def send_relationship_top(self, interaction: discord.Interaction, *, public: bool = False) -> None:
         if interaction.guild is None:
@@ -787,9 +886,8 @@ class WeddingsCog(commands.Cog):
             await interaction.followup.send("Пока нет данных для топа.", ephemeral=True)
             return
 
-        embed, file = payload
+        file = payload
         kwargs: dict[str, Any] = {
-            "embed": embed,
             "file": file,
             "allowed_mentions": discord.AllowedMentions.none(),
         }
@@ -1050,9 +1148,177 @@ class WeddingsCog(commands.Cog):
             await interaction.response.send_message("Этот пользователь не состоит в браке.", ephemeral=True)
             return
 
-        embed = await self.build_couple_embed(marriage)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.defer()
+        proposer_name = await resolve_display_name(self.bot, interaction.guild, int(marriage["proposer_id"]), max_len=26)
+        partner_name = await resolve_display_name(self.bot, interaction.guild, int(marriage["partner_id"]), max_len=26)
+        avatar = await resolve_avatar_bytes(self.bot, interaction.guild, int(marriage["proposer_id"]))
+        level = int(marriage["relationship_level"] or 1)
+        xp = int(marriage["relationship_xp"] or 0)
+        current_floor = RELATIONSHIP_LEVELS[max(level - 1, 0)][0]
+        next_xp = get_next_level_xp(level)
+        progress = 1.0 if next_xp is None else (xp - current_floor) / max(next_xp - current_floor, 1)
+        file = make_profile_file(
+            f"{proposer_name} + {partner_name}",
+            "Профиль пары",
+            (("Уровень", f"{level} · {get_relationship_level_title(level)}"), ("XP", str(xp)), ("Вместе", f"{days_together(marriage['married_at'])} дн.")),
+            avatar=avatar,
+            progress=progress,
+            theme="relationships",
+            filename="couple_profile.png",
+            description=f"Профиль пары {proposer_name} и {partner_name}",
+        )
+        await interaction.followup.send(file=file, allowed_mentions=discord.AllowedMentions.none())
 
+    @wedding_group.command(name="gift", description="Подарить партнёру предмет из инвентаря")
+    async def gift_inventory_item(self, interaction: discord.Interaction, item_id: int, quantity: app_commands.Range[int, 1, 100] = 1) -> None:
+        if interaction.guild is None or self.bot.db is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        marriage = await self.get_active_marriage(interaction.guild.id, interaction.user.id)
+        if marriage is None:
+            await interaction.response.send_message("Вы не состоите в браке.", ephemeral=True)
+            return
+        partner_id = self._partner_id(marriage, interaction.user.id)
+        result = await self.bot.economy.gift_item(
+            self.bot.economy_db, interaction.guild.id, interaction.user.id, partner_id, item_id, int(quantity)
+        )
+        if not result.ok:
+            await interaction.response.send_message(result.message, ephemeral=True)
+            return
+        wedding_db = self._connection()
+        await wedding_db.execute(
+            """INSERT INTO relationship_gift_log
+               (guild_id,marriage_id,giver_id,item_id,quantity,created_at) VALUES (?,?,?,?,?,?)""",
+            (interaction.guild.id, int(marriage["id"]), interaction.user.id, item_id, int(quantity), to_iso()),
+        )
+        await wedding_db.commit()
+        _, cooldown_text, _, _, xp = await self.perform_relationship_action(interaction.guild.id, interaction.user, "gift")
+        suffix = f" Пара получила {xp} XP." if cooldown_text is None else " Подарок передан, но XP сейчас на cooldown."
+        await interaction.response.send_message(
+            f"🎁 Предмет ×{quantity} передан <@{partner_id}>.{suffix}",
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+
+    @wedding_group.command(name="quest", description="Забрать награду за совместную недельную активность")
+    async def relationship_quest(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or self.bot.db is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        marriage = await self.get_active_marriage(interaction.guild.id, interaction.user.id)
+        if marriage is None:
+            await interaction.response.send_message("Вы не состоите в браке.", ephemeral=True)
+            return
+        members = (int(marriage["proposer_id"]), int(marriage["partner_id"]))
+        db = self._connection()
+        since = to_iso(utcnow() - timedelta(days=7))
+        cursor = await db.execute(
+            """SELECT actor_id, COUNT(*) AS total FROM relationship_xp_logs
+               WHERE guild_id=? AND marriage_id=? AND actor_id IN (?, ?) AND created_at>=?
+               GROUP BY actor_id""",
+            (interaction.guild.id, int(marriage["id"]), members[0], members[1], since),
+        )
+        progress = {int(row["actor_id"]): int(row["total"]) for row in await cursor.fetchall()}
+        if any(progress.get(user_id, 0) < 2 for user_id in members):
+            await interaction.response.send_message(
+                f"Для задания каждый партнёр должен выполнить 2 действия за 7 дней. Прогресс: {progress.get(members[0], 0)}/2 и {progress.get(members[1], 0)}/2.",
+                ephemeral=True,
+            )
+            return
+        iso = utcnow().date().isocalendar()
+        quest_key = f"weekly:{iso.year}:{iso.week}"
+        async with self._db_lock:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "INSERT OR IGNORE INTO relationship_quest_claims(guild_id, marriage_id, quest_key, claimed_at) VALUES (?, ?, ?, ?)",
+                    (interaction.guild.id, int(marriage["id"]), quest_key, to_iso()),
+                )
+                already_claimed = cursor.rowcount == 0
+                if already_claimed:
+                    await db.rollback()
+                else:
+                    await self.add_relationship_xp(interaction.guild.id, int(marriage["id"]), interaction.user.id, "weekly_quest", 80)
+                    await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+        for user_id in members:
+            await self.bot.economy.change_balance(
+                self.bot.economy_db, interaction.guild.id, user_id, 100, reason="relationship_weekly_quest", xp=25,
+                idempotency_key=f"relationship-quest:{interaction.guild.id}:{marriage['id']}:{quest_key}:{user_id}",
+            )
+        await interaction.response.send_message("💞 Совместное задание выполнено: +80 XP отношений и по 100 монет каждому.")
+
+
+    @wedding_group.command(name="memories", description="Открыть памятные вехи пары")
+    async def relationship_memories(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None or self.bot.db is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        marriage = await self.get_active_marriage(interaction.guild.id, interaction.user.id)
+        if marriage is None:
+            await interaction.response.send_message("Вы не состоите в браке.", ephemeral=True)
+            return
+        marriage_id = int(marriage["id"])
+        xp = int(marriage["relationship_xp"] or 0)
+        days = days_together(str(marriage["married_at"]))
+        eligible = eligible_relationship_milestones(xp, days)
+        wedding_db = self._connection()
+        for key in eligible:
+            await wedding_db.execute(
+                """INSERT OR IGNORE INTO relationship_milestone_claims
+                   (guild_id,marriage_id,milestone_key,claimed_at) VALUES (?,?,?,?)""",
+                (interaction.guild.id, marriage_id, key, to_iso()),
+            )
+            await wedding_db.execute(
+                """INSERT OR IGNORE INTO relationship_collectibles
+                   (guild_id,marriage_id,collectible_key,source,unlocked_at) VALUES (?,?,?,?,?)""",
+                (interaction.guild.id, marriage_id, f"memory_{key}", "milestone", to_iso()),
+            )
+        await wedding_db.commit()
+
+        milestone_by_key = {key: (title, reward) for key, title, _, reward in RELATIONSHIP_MILESTONES}
+        members = (int(marriage["proposer_id"]), int(marriage["partner_id"]))
+        # Deterministic economy keys also reconcile a crash between the wedding DB
+        # claim and the main economy ledger on the next command call.
+        for key in eligible:
+            _, reward = milestone_by_key[key]
+            for member_id in members:
+                await self.bot.economy.change_balance(
+                    self.bot.economy_db,
+                    interaction.guild.id,
+                    member_id,
+                    reward,
+                    reason="relationship_milestone",
+                    reference=f"{marriage_id}:{key}",
+                    idempotency_key=f"relationship-milestone:{interaction.guild.id}:{marriage_id}:{key}:{member_id}",
+                )
+        lines = [f"✓ **{milestone_by_key[key][0]}**" for key in eligible]
+        await interaction.response.send_message(
+            "**Воспоминания пары**\n" + ("\n".join(lines) if lines else "Первая памятная веха ещё впереди."),
+            ephemeral=True,
+        )
+
+    @wedding_group.command(name="collection", description="Показать коллекцию пары")
+    async def relationship_collection(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        marriage = await self.get_active_marriage(interaction.guild.id, interaction.user.id)
+        if marriage is None:
+            await interaction.response.send_message("Вы не состоите в браке.", ephemeral=True)
+            return
+        cursor = await self._connection().execute(
+            """SELECT collectible_key,unlocked_at FROM relationship_collectibles
+               WHERE guild_id=? AND marriage_id=? ORDER BY unlocked_at""",
+            (interaction.guild.id, int(marriage["id"])),
+        )
+        rows = await cursor.fetchall()
+        lines = [f"◆ `{row['collectible_key']}` · {str(row['unlocked_at'])[:10]}" for row in rows]
+        await interaction.response.send_message(
+            "**Коллекция пары**\n" + ("\n".join(lines) if lines else "Коллекция пока пуста."),
+            ephemeral=True,
+        )
 
     @wedding_group.command(name="relationships", description="Открыть меню развития отношений пары")
     async def relationships(self, interaction: discord.Interaction) -> None:
@@ -1097,27 +1363,26 @@ class WeddingsCog(commands.Cog):
         for row in rows:
             proposer_name = await resolve_display_name(self.bot, interaction.guild, int(row["proposer_id"]), max_len=28)
             partner_name = await resolve_display_name(self.bot, interaction.guild, int(row["partner_id"]), max_len=28)
+            avatar = await resolve_avatar_bytes(self.bot, interaction.guild, int(row["proposer_id"]))
             days = days_together(row["married_at"])
             leaderboard_rows.append(
                 LeaderboardImageRow(
                     name=f"{proposer_name} + {partner_name}",
                     primary=f"Вместе {days} дн.",
                     value=max(days, 1),
+                    avatar=avatar,
                 )
             )
 
         try:
             filename = "couples_top.png"
-            file = make_leaderboard_file("ТОП ПАР ПО ДЛИТЕЛЬНОСТИ БРАКА", leaderboard_rows, filename=filename)
-            embed = discord.Embed(title="Топ пар", color=GOLD_COLOR, timestamp=utcnow())
-            embed.set_image(url=f"attachment://{filename}")
+            file = make_leaderboard_file("ТОП ПАР ПО ДЛИТЕЛЬНОСТИ БРАКА", leaderboard_rows, filename=filename, theme="relationships")
         except Exception:
             logger.exception("Failed to generate couples top image")
             await interaction.followup.send("Не удалось создать графический топ. Попробуйте позже.", ephemeral=True)
             return
 
         await interaction.followup.send(
-            embed=embed,
             file=file,
             allowed_mentions=discord.AllowedMentions.none(),
         )

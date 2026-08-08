@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import shutil
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -21,6 +23,10 @@ from services.reaction_role_service import ReactionRoleService
 from services.support_ticket_service import SupportTicketService
 from services.watchmode_service import WatchmodeService
 from services.social_game_service import SocialGameService
+from services.economy_service import EconomyService
+from services.progression_service import ProgressionService
+from services.community_ops_service import CommunityOpsService
+from services.automod_service import AutomodService
 from utils.command_localizations import RussianCommandNameTranslator
 from utils.engagement_content import EngagementContent, load_engagement_content
 from utils.voice_runtime import find_ffmpeg, log_voice_runtime
@@ -38,6 +44,16 @@ class MovieBot(commands.Bot):
         self.settings = settings
         self.session: aiohttp.ClientSession | None = None
         self.db: aiosqlite.Connection | None = None
+        # Each write-heavy domain gets its own SQLite connection.  Sharing one
+        # aiosqlite connection between unrelated service locks lets one task
+        # commit or collide with another task's transaction.
+        self.economy_db: aiosqlite.Connection | None = None
+        self.progression_db: aiosqlite.Connection | None = None
+        self.community_db: aiosqlite.Connection | None = None
+        self.digest_db: aiosqlite.Connection | None = None
+        self.automod_db: aiosqlite.Connection | None = None
+        self.giveaway_db: aiosqlite.Connection | None = None
+        self.delivery_db: aiosqlite.Connection | None = None
 
         self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
@@ -47,6 +63,8 @@ class MovieBot(commands.Bot):
         self.reaction_roles = ReactionRoleService()
         self.support_tickets = SupportTicketService()
         self.social_games = SocialGameService()
+        self.economy = EconomyService()
+        self.progression = ProgressionService()
         self.engagement_content: EngagementContent = load_engagement_content(settings.engagement_content_path)
         self._extensions_bootstrapped = False
         self._support_category_logged = False
@@ -110,8 +128,8 @@ class MovieBot(commands.Bot):
 
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         self._prepare_database_path()
-        self.db = await aiosqlite.connect(self.settings.db_path)
-        self.db.row_factory = aiosqlite.Row
+        self._backup_database_before_migrations()
+        self.db = await self._open_database_connection()
 
         await self.levels.init_db(self.db)
         await self.jails.init_db(self.db)
@@ -120,6 +138,15 @@ class MovieBot(commands.Bot):
         await self.reaction_roles.init_db(self.db)
         await self.support_tickets.init_db(self.db)
         await self.social_games.init_db(self.db)
+        self.economy_db = await self._open_database_connection()
+        await self.economy.init_db(self.economy_db)
+        self.progression_db = await self._open_database_connection()
+        await self.progression.init_db(self.progression_db)
+        self.community_db = await self._open_database_connection()
+        self.digest_db = await self._open_database_connection()
+        self.automod_db = await self._open_database_connection()
+        self.giveaway_db = await self._open_database_connection()
+        self.delivery_db = await self._open_database_connection()
         await self.watchmode.load_genres(self.session)
         log_voice_runtime(logger)
 
@@ -138,6 +165,15 @@ class MovieBot(commands.Bot):
         if failed_cogs:
             logger.warning("Bot started with failed cogs: count=%s", len(failed_cogs))
 
+    async def _open_database_connection(self) -> aiosqlite.Connection:
+        db = await aiosqlite.connect(self.settings.db_path)
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute("PRAGMA journal_mode=WAL")
+        await db.execute("PRAGMA synchronous=NORMAL")
+        await db.execute("PRAGMA busy_timeout=10000")
+        return db
+
     def _prepare_database_path(self) -> None:
         db_path = Path(self.settings.db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -151,13 +187,77 @@ class MovieBot(commands.Bot):
             shutil.move(str(old_default), str(db_path))
             logger.info("Migrated legacy SQLite DB from %s to %s", old_default, db_path)
 
+    def _backup_database_before_migrations(self) -> None:
+        """Create a recoverable snapshot before any pending core migration."""
+        db_path = Path(self.settings.db_path)
+        if not db_path.exists() or db_path.stat().st_size == 0:
+            return
+
+        pending_label = "economy"
+        try:
+            with closing(sqlite3.connect(db_path)) as source:
+                table = source.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+                ).fetchone()
+                if table:
+                    economy_applied = source.execute(
+                        "SELECT 1 FROM schema_migrations WHERE name = ?",
+                        (EconomyService.MIGRATION_VERSION,),
+                    ).fetchone()
+                    gameplay_applied = source.execute(
+                        "SELECT 1 FROM schema_migrations WHERE name = ?",
+                        (ProgressionService.MIGRATION_VERSION,),
+                    ).fetchone()
+                    community_applied = source.execute(
+                        "SELECT 1 FROM schema_migrations WHERE name = ?",
+                        (CommunityOpsService.MIGRATION_VERSION,),
+                    ).fetchone()
+                    automod_applied = source.execute(
+                        "SELECT 1 FROM schema_migrations WHERE name = ?",
+                        (AutomodService.MIGRATION_VERSION,),
+                    ).fetchone()
+                    if all(
+                        applied is not None
+                        for applied in (economy_applied, gameplay_applied, community_applied, automod_applied)
+                    ):
+                        return
+                    if economy_applied is not None:
+                        pending_label = "gameplay" if gameplay_applied is None else "features"
+        except sqlite3.Error:
+            logger.exception("Could not inspect SQLite migration state; backup will still be attempted")
+
+        backup_dir = db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = backup_dir / f"{db_path.stem}-pre-{pending_label}-{stamp}{db_path.suffix}"
+        try:
+            with closing(sqlite3.connect(db_path)) as source, closing(sqlite3.connect(backup_path)) as target:
+                source.backup(target)
+        except sqlite3.Error:
+            logger.exception("Failed to create pre-migration database backup at %s", backup_path)
+            raise
+        logger.info("Created pre-migration database backup: %s", backup_path)
+
     async def close(self) -> None:
         if self.minecraft_presence_loop.is_running():
             self.minecraft_presence_loop.cancel()
         if self.session and not self.session.closed:
             await self.session.close()
-        if self.db:
-            await self.db.close()
+        connections = (
+            self.automod_db,
+            self.giveaway_db,
+            self.delivery_db,
+            self.digest_db,
+            self.community_db,
+            self.progression_db,
+            self.economy_db,
+            self.db,
+        )
+        seen: set[int] = set()
+        for connection in connections:
+            if connection is not None and id(connection) not in seen:
+                seen.add(id(connection))
+                await connection.close()
         await super().close()
 
     async def on_ready(self) -> None:

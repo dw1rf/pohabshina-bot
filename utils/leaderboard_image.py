@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from functools import lru_cache
@@ -10,7 +11,9 @@ from pathlib import Path
 from typing import Sequence
 
 import discord
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+
+from utils.brand import BRAND_ACCENT, BRAND_NAME, BRAND_PURPLE, theme_path
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,9 @@ LOCAL_FONT_DIR = PROJECT_ROOT / "assets" / "fonts"
 WINDOWS_FONT_DIR = Path("C:/Windows/Fonts")
 COLOR_EMOJI_SIZE = 109
 ELLIPSIS = "..."
+AVATAR_CACHE_TTL_SECONDS = 15 * 60
+AVATAR_CACHE_MAX_ITEMS = 512
+_AVATAR_CACHE: dict[tuple[int, str], tuple[float, bytes | None]] = {}
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,6 +35,7 @@ class LeaderboardImageRow:
     value: int | float
     primary: str = ""
     secondary: str = ""
+    avatar: bytes | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,15 +125,17 @@ class FontStack:
 
 
 def _font_candidates(kind: str, bold: bool) -> list[Path]:
+    dm_sans = LOCAL_FONT_DIR / "DMSans-Variable.ttf"
     noto_regular = LOCAL_FONT_DIR / "NotoSans-Regular.ttf"
     noto_bold = LOCAL_FONT_DIR / "NotoSans-Bold.ttf"
     noto_ui = noto_bold if bold else noto_regular
 
     if kind == "name":
         return [
+            dm_sans,
+            noto_ui,
             LOCAL_FONT_DIR / "NotoSansSymbols2-Regular.ttf",
             LOCAL_FONT_DIR / "NotoSansMath-Regular.ttf",
-            noto_ui,
             LOCAL_FONT_DIR / "NotoSansCJKjp-Regular.otf",
             WINDOWS_FONT_DIR / "seguiemj.ttf",
             WINDOWS_FONT_DIR / "seguisym.ttf",
@@ -142,6 +151,7 @@ def _font_candidates(kind: str, bold: bool) -> list[Path]:
         ]
 
     return [
+        dm_sans,
         noto_ui,
         LOCAL_FONT_DIR / "NotoSansMath-Regular.ttf",
         WINDOWS_FONT_DIR / ("arialbd.ttf" if bold else "arial.ttf"),
@@ -168,6 +178,8 @@ def load_font_stack(size: int, bold: bool = False, kind: str = "ui") -> FontStac
                 emoji_scale = size / COLOR_EMOJI_SIZE
             else:
                 font = ImageFont.truetype(str(path), size=size)
+                if path.name == "DMSans-Variable.ttf" and hasattr(font, "set_variation_by_axes"):
+                    font.set_variation_by_axes([min(max(size, 9), 40), 700 if bold else 400])
                 emoji_scale = 1.0
         except OSError:
             continue
@@ -256,7 +268,7 @@ def safe_text(text: str, max_len: int = 32) -> str:
 
 
 def sanitize_leaderboard_name(name: str, max_len: int = 0) -> str:
-    return _clean_single_line_text(name, default=DEFAULT_NAME)
+    return _clean_single_line_text(name, default=DEFAULT_NAME, max_len=max_len)
 
 
 async def resolve_display_name(
@@ -281,6 +293,36 @@ async def resolve_display_name(
     if user is not None:
         return sanitize_leaderboard_name(user.display_name, max_len=max_len)
     return f"Пользователь {str(user_id)[-4:]}"
+
+
+async def resolve_avatar_bytes(
+    bot: discord.Client,
+    guild: discord.Guild | None,
+    user_id: int,
+) -> bytes | None:
+    member = guild.get_member(user_id) if guild is not None else None
+    user = member or bot.get_user(user_id)
+    if user is None:
+        try:
+            user = await bot.fetch_user(user_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+    avatar = user.display_avatar.with_size(128)
+    cache_key = (user_id, str(getattr(avatar, "key", avatar.url)))
+    cached = _AVATAR_CACHE.get(cache_key)
+    now = time.monotonic()
+    cache_ttl = 60 if cached is not None and cached[1] is None else AVATAR_CACHE_TTL_SECONDS
+    if cached is not None and now - cached[0] < cache_ttl:
+        return cached[1]
+    try:
+        payload = await avatar.read()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException, OSError):
+        logger.debug("Could not load avatar for leaderboard user %s", user_id, exc_info=True)
+        payload = None
+    _AVATAR_CACHE[cache_key] = (now, payload)
+    while len(_AVATAR_CACHE) > AVATAR_CACHE_MAX_ITEMS:
+        _AVATAR_CACHE.pop(next(iter(_AVATAR_CACHE)))
+    return payload
 
 
 @lru_cache(maxsize=2048)
@@ -531,153 +573,157 @@ def _draw_progress(
         draw.rounded_rectangle((x1, y1, x1 + max(6, int(filled * 0.45)), y2), radius=5, fill=(194, 132, 255, 185))
 
 
+def _themed_canvas(size: tuple[int, int], theme: str) -> Image.Image:
+    path = theme_path(theme)
+    if path is None:
+        image = Image.new("RGBA", size, (13, 11, 18, 255))
+    else:
+        with Image.open(path) as source:
+            image = ImageOps.fit(source.convert("RGBA"), size, method=Image.Resampling.LANCZOS)
+    shade = Image.new("RGBA", size, (0, 0, 0, 0))
+    shade_draw = ImageDraw.Draw(shade, "RGBA")
+    width, height = size
+    for x in range(width):
+        position = x / max(width - 1, 1)
+        strength = 212 if position < 0.55 else int(212 - 172 * ((position - 0.55) / 0.45))
+        shade_draw.line((x, 0, x, height), fill=(5, 6, 9, max(36, strength)))
+    for y in range(height):
+        edge = min(y / max(height * 0.18, 1), (height - y) / max(height * 0.2, 1), 1.0)
+        alpha = int(56 * (1.0 - max(edge, 0.0)))
+        if alpha:
+            shade_draw.line((0, y, width, y), fill=(0, 0, 0, alpha))
+    image.alpha_composite(shade)
+    return image
+
+
+def _avatar_circle(data: bytes | None, size: int, *, fallback: str = "V") -> Image.Image:
+    if data:
+        try:
+            with Image.open(io.BytesIO(data)) as source:
+                avatar = ImageOps.fit(source.convert("RGBA"), (size, size), method=Image.Resampling.LANCZOS)
+        except (OSError, ValueError):
+            avatar = Image.new("RGBA", (size, size), (*BRAND_PURPLE, 255))
+    else:
+        avatar = Image.new("RGBA", (size, size), (42, 38, 47, 255))
+        draw = ImageDraw.Draw(avatar)
+        font = load_font_stack(max(18, size // 2), bold=True, kind="name")
+        initial = safe_text(fallback, 1).upper()
+        width = _text_length(draw, initial, font)
+        _draw_text(draw, (int((size - width) / 2), size // 5), initial, fill=(255, 255, 255, 255), font=font)
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    avatar.putalpha(mask)
+    return avatar
+
+
 def draw_leaderboard_image(
     title: str,
     rows: Sequence[LeaderboardImageRow],
     *,
-    width: int = 1400,
+    width: int = 1600,
+    height: int = 1200,
+    theme: str = "neutral",
 ) -> io.BytesIO:
-    safe_rows = list(rows)
-    row_height = 57
-    panel_x = 38
-    panel_y = 92
-    panel_w = width - panel_x * 2
-    top_area = 170
-    table_header_height = 76
-    bottom_padding = 42
-    body_height = max(len(safe_rows), 1) * row_height
-    height = panel_y * 2 + top_area + table_header_height + body_height + bottom_padding
-
-    image = Image.new("RGBA", (width, height), (30, 30, 31, 255))
-    _draw_background(image)
+    safe_rows = list(rows)[:10]
+    image = _themed_canvas((width, height), theme)
     draw = ImageDraw.Draw(image, "RGBA")
+    title_font = load_font_stack(56, bold=True)
+    eyebrow_font = load_font_stack(19, bold=True)
+    name_font = load_font_stack(27, bold=True, kind="name")
+    meta_font = load_font_stack(19)
+    score_font = load_font_stack(26, bold=True)
+    rank_font = load_font_stack(22, bold=True)
 
-    title_font = load_font_stack(48, kind="ui")
-    micro_font = load_font_stack(14, bold=True, kind="ui")
-    header_font = load_font_stack(17, bold=True, kind="ui")
-    name_font = load_font_stack(25, bold=True, kind="name")
-    small_font = load_font_stack(15, bold=True, kind="ui")
-    meta_font = load_font_stack(20, kind="ui")
-    score_font = load_font_stack(20, bold=True, kind="ui")
+    _draw_text(draw, (72, 50), BRAND_NAME.upper(), fill=(213, 199, 208, 235), font=eyebrow_font)
+    title_text = safe_text(title, 42).capitalize()
+    _draw_text(draw, (72, 88), title_text, fill=(250, 247, 249, 255), font=title_font)
+    header_y = 188
+    _draw_text(draw, (202, header_y), "УЧАСТНИК", fill=(164, 155, 165, 255), font=eyebrow_font)
+    _draw_text(draw, (680, header_y), "СТАТИСТИКА", fill=(164, 155, 165, 255), font=eyebrow_font)
+    _draw_text(draw, (1072, header_y), "ИТОГ", fill=(164, 155, 165, 255), font=eyebrow_font)
+    draw.line((72, 224, 1168, 224), fill=(255, 255, 255, 34), width=1)
 
-    panel_box = (panel_x, panel_y, panel_x + panel_w, height - panel_y)
-    image.alpha_composite(_rounded_layer(image.size, (panel_x + 8, panel_y + 14, panel_x + panel_w + 8, height - panel_y + 14), radius=18, fill=(0, 0, 0, 125), blur=22))
-    draw.rounded_rectangle(panel_box, radius=18, fill=(0, 0, 0, 246), outline=(42, 42, 48, 255), width=2)
-
-    _draw_lens_disc(image, (width // 2, panel_y + 38), 238)
-    draw.rectangle((panel_x + 1, panel_y + 144, panel_x + panel_w - 1, panel_y + top_area + 38), fill=(0, 0, 0, 102))
-
-    title_text = "LEADERBOARD"
-    title_width = _text_length(draw, title_text, title_font)
-    _draw_text(draw, (int(width / 2 - title_width / 2), panel_y + 76), title_text, fill=(248, 249, 255, 238), font=title_font)
-    brand = _clean_single_line_text(title, default="O.XY", max_len=18)
-    brand_width = _text_length(draw, brand, micro_font)
-    _draw_text(draw, (int(width / 2 - brand_width / 2), panel_y + 38), brand, fill=(240, 240, 255, 206), font=micro_font)
-
-    table_y = panel_y + top_area
-    table_x = panel_x + 32
-    table_r = panel_x + panel_w - 32
-    table_bottom = height - panel_y - 38
-    table_box = (table_x, table_y, table_r, table_bottom)
-    image.alpha_composite(_rounded_layer(image.size, (table_x, table_y + 6, table_r, table_bottom + 6), radius=12, fill=(0, 0, 0, 125), blur=14))
-    draw.rounded_rectangle(table_box, radius=12, fill=(17, 17, 19, 214), outline=(31, 31, 36, 238), width=1)
-    draw.rounded_rectangle((table_x + 2, table_y + 2, table_r - 2, table_y + 54), radius=10, fill=(36, 34, 42, 94))
-    _draw_corner_ticks(draw, table_box)
-
-    table_w = table_r - table_x
-    columns = {
-        "rank": table_x + 38,
-        "avatar": table_x + 190,
-        "name": table_x + 238,
-        "content": table_x + int(table_w * 0.55),
-        "reward": table_x + int(table_w * 0.70),
-        "score": table_x + int(table_w * 0.84),
-    }
-    headers = [
-        ("//RANK", columns["rank"]),
-        ("//CHAMPIONS", table_x + 170),
-        ("//CONTENT", columns["content"]),
-        ("//REWARD", columns["reward"]),
-        ("//SCORE", columns["score"]),
-    ]
-    for label, x in headers:
-        _draw_text(draw, (x, table_y + 56), label, fill=(161, 159, 166, 225), font=header_font)
-
-    for x in [columns["content"] - 28, columns["reward"] - 28, columns["score"] - 28]:
-        draw.line((x, table_y + 2, x, table_bottom - 2), fill=(255, 255, 255, 11), width=1)
-
-    values = [max(float(row.value), 0.0) for row in safe_rows]
-    max_value = max(values, default=1.0) or 1.0
-    place_styles = {
-        1: {
-            "fill": (86, 78, 17, 142),
-            "rank": (238, 199, 87, 255),
-            "line": (232, 189, 76, 116),
-        },
-        2: {
-            "fill": (111, 108, 122, 118),
-            "rank": (214, 217, 229, 255),
-            "line": (186, 190, 207, 96),
-        },
-        3: {
-            "fill": (98, 44, 18, 132),
-            "rank": (215, 149, 82, 255),
-            "line": (222, 120, 58, 100),
-        },
-    }
-
-    body_y = table_y + table_header_height
+    row_height = 88
+    first_y = 234
+    place_colors = {1: (229, 177, 92), 2: (179, 187, 199), 3: (190, 130, 99)}
     if not safe_rows:
-        empty_text = "No leaderboard data yet"
-        _draw_text(draw, (table_x + 42, body_y + 24), empty_text, fill=(196, 190, 202, 255), font=meta_font)
+        _draw_text(draw, (72, 286), "Пока нет данных", fill=(211, 203, 210, 255), font=name_font)
 
     for index, row in enumerate(safe_rows, start=1):
-        y = body_y + (index - 1) * row_height
-        row_box = (table_x + 18, y, table_r - 18, y + row_height)
-        style = place_styles.get(index)
-        if style:
-            draw.rectangle(row_box, fill=style["fill"])
-            draw.rectangle((row_box[0], row_box[1], row_box[2], row_box[1] + 1), fill=style["line"])
-        else:
-            base_fill = (28, 28, 30, 170) if index % 2 else (7, 7, 8, 178)
-            draw.rectangle(row_box, fill=base_fill)
-        draw.line((row_box[0], row_box[3], row_box[2], row_box[3]), fill=(0, 0, 0, 128), width=2)
-
-        rank_color = style["rank"] if style else (156, 156, 162, 255)
-        _draw_rank_marker(draw, (columns["rank"] + 34, y + row_height // 2), index, font=score_font, color=rank_color)
+        y = first_y + (index - 1) * row_height
+        accent = place_colors.get(index, (145, 133, 142))
+        fill = (20, 18, 23, 142) if index % 2 else (28, 25, 30, 142)
         if index <= 3:
-            _draw_avatar_orb(draw, (columns["avatar"], y + row_height // 2), index)
-
-        name_max_width = columns["content"] - columns["name"] - 46
-        name = _fit_text(draw, sanitize_leaderboard_name(row.name), name_font, name_max_width)
-        name_x = columns["name"]
+            fill = (31, 27, 31, 172)
+        draw.rounded_rectangle((72, y, 1168, y + 76), radius=10, fill=fill)
         if index <= 3:
-            _draw_text(draw, (name_x, y + 17), "[", fill=(220, 220, 226, 175), font=name_font)
-            _draw_text(draw, (name_x + 24, y + 17), name, fill=(250, 249, 255, 255), font=name_font)
-            name_end = name_x + 38 + int(_text_length(draw, name, name_font))
-            _draw_text(draw, (min(name_end, columns["content"] - 34), y + 17), "]", fill=(220, 220, 226, 175), font=name_font)
-        else:
-            _draw_text(draw, (name_x, y + 17), name, fill=(238, 238, 242, 245), font=name_font)
+            draw.rounded_rectangle((72, y + 14, 76, y + 62), radius=2, fill=(*accent, 235))
+        rank = str(index)
+        rank_w = _text_length(draw, rank, rank_font)
+        _draw_text(draw, (110 - int(rank_w / 2), y + 25), rank, fill=(*accent, 255), font=rank_font)
+        avatar = _avatar_circle(row.avatar, 52, fallback=row.name)
+        image.alpha_composite(avatar, (140, y + 12))
 
-        primary = _fit_text(draw, safe_text(row.primary, max_len=44), meta_font, columns["reward"] - columns["content"] - 28) if row.primary else "-"
-        secondary = _fit_text(draw, safe_text(row.secondary, max_len=44), meta_font, columns["score"] - columns["reward"] - 62) if row.secondary else "-"
-        _draw_text(draw, (columns["content"], y + 18), primary, fill=(236, 236, 240, 238), font=meta_font)
-        _draw_text(draw, (columns["reward"], y + 18), secondary, fill=(197, 242, 190, 250), font=meta_font)
-        draw.ellipse((columns["reward"] + int(_text_length(draw, secondary, meta_font)) + 13, y + 22, columns["reward"] + int(_text_length(draw, secondary, meta_font)) + 27, y + 36), outline=(224, 236, 226, 220), width=2)
-
+        name = _fit_text(draw, sanitize_leaderboard_name(row.name), name_font, 420)
+        _draw_text(draw, (210, y + 21), name, fill=(248, 245, 247, 255), font=name_font)
+        primary = _fit_text(draw, safe_text(row.primary, 48) if row.primary else "—", meta_font, 320)
+        secondary = _fit_text(draw, safe_text(row.secondary, 48) if row.secondary else "—", meta_font, 320)
+        _draw_text(draw, (680, y + 13), primary, fill=(235, 230, 233, 255), font=meta_font)
+        _draw_text(draw, (680, y + 42), secondary, fill=(165, 155, 165, 255), font=meta_font)
         value = max(float(row.value), 0.0)
-        percent = min(max(value / max_value, 0.0), 1.0)
-        score_text = f"{value:.2f}" if value % 1 else f"{int(value):.2f}"
-        score_text = _fit_text(draw, score_text, score_font, table_r - columns["score"] - 38)
-        _draw_text(draw, (columns["score"], y + 17), score_text, fill=(244, 244, 248, 252), font=score_font)
-        progress_x1 = columns["score"]
-        progress_x2 = table_r - 32
-        progress_y = y + row_height - 7
-        draw.line((progress_x1, progress_y, progress_x2, progress_y), fill=(255, 255, 255, 18), width=2)
-        draw.line((progress_x1, progress_y, progress_x1 + int((progress_x2 - progress_x1) * percent), progress_y), fill=(142, 96, 244, 78), width=2)
+        score = f"{int(value):,}".replace(",", " ") if value.is_integer() else f"{value:.1f}"
+        score = _fit_text(draw, score, score_font, 150)
+        score_width = _text_length(draw, score, score_font)
+        _draw_text(draw, (1142 - int(score_width), y + 21), score, fill=(250, 247, 249, 255), font=score_font)
 
     output = io.BytesIO()
-    image.convert("RGB").save(output, format="PNG")
+    image.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
+    output.seek(0)
+    return output
+
+
+def draw_profile_card(
+    name: str,
+    headline: str,
+    stats: Sequence[tuple[str, str]],
+    *,
+    avatar: bytes | None = None,
+    progress: float = 0.0,
+    theme: str = "neutral",
+    accent: tuple[int, int, int] | None = None,
+    size: tuple[int, int] = (1200, 675),
+) -> io.BytesIO:
+    image = _themed_canvas(size, theme)
+    draw = ImageDraw.Draw(image, "RGBA")
+    title_font = load_font_stack(48, bold=True)
+    name_font = load_font_stack(36, bold=True, kind="name")
+    label_font = load_font_stack(17, bold=True)
+    value_font = load_font_stack(26, bold=True)
+    _draw_text(draw, (72, 58), BRAND_NAME.upper(), fill=(204, 193, 200, 240), font=label_font)
+    headline_text = safe_text(headline, 34).capitalize()
+    _draw_text(draw, (72, 94), headline_text, fill=(250, 247, 249, 255), font=title_font)
+    draw.line((72, 170, 766, 170), fill=(255, 255, 255, 38), width=1)
+    avatar_image = _avatar_circle(avatar, 132, fallback=name)
+    image.alpha_composite(avatar_image, (72, 214))
+    fitted_name = _fit_text(draw, sanitize_leaderboard_name(name), name_font, 520)
+    _draw_text(draw, (232, 216), fitted_name, fill=(250, 247, 249, 255), font=name_font)
+    stat_items = list(stats)[:4]
+    for index, (label, value) in enumerate(stat_items):
+        x = 232 + (index % 3) * 188
+        y = 282 + (index // 3) * 92
+        _draw_text(draw, (x, y), safe_text(label.upper(), 22), fill=(168, 157, 166, 255), font=label_font)
+        _draw_text(draw, (x, y + 29), safe_text(value, 26), fill=(246, 242, 245, 255), font=value_font)
+    _draw_text(draw, (72, 478), "ПРОГРЕСС", fill=(168, 157, 166, 255), font=label_font)
+    percent_text = f"{int(min(max(progress, 0.0), 1.0) * 100)}%"
+    percent_width = _text_length(draw, percent_text, label_font)
+    _draw_text(draw, (766 - int(percent_width), 478), percent_text, fill=(220, 211, 217, 255), font=label_font)
+    draw.rounded_rectangle((72, 515, 766, 525), radius=5, fill=(255, 255, 255, 42))
+    fill_width = int(694 * min(max(progress, 0.0), 1.0))
+    if fill_width:
+        progress_accent = accent or BRAND_ACCENT
+        draw.rounded_rectangle((72, 515, 72 + fill_width, 525), radius=5, fill=(*progress_accent, 255))
+    output = io.BytesIO()
+    image.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
     output.seek(0)
     return output
 
@@ -687,6 +733,23 @@ def make_leaderboard_file(
     rows: Sequence[LeaderboardImageRow],
     *,
     filename: str = "leaderboard.png",
+    theme: str = "neutral",
 ) -> discord.File:
-    image = draw_leaderboard_image(title, rows)
-    return discord.File(image, filename=filename)
+    image = draw_leaderboard_image(title, rows, theme=theme)
+    return discord.File(image, filename=filename, description=f"{title} — {BRAND_NAME}")
+
+
+def make_profile_file(
+    name: str,
+    headline: str,
+    stats: Sequence[tuple[str, str]],
+    *,
+    avatar: bytes | None = None,
+    progress: float = 0.0,
+    theme: str = "neutral",
+    accent: tuple[int, int, int] | None = None,
+    filename: str = "card.png",
+    description: str | None = None,
+) -> discord.File:
+    image = draw_profile_card(name, headline, stats, avatar=avatar, progress=progress, theme=theme, accent=accent)
+    return discord.File(image, filename=filename, description=description or f"{headline}: {name}")

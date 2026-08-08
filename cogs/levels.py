@@ -10,9 +10,17 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from utils.helpers import required_messages_for_level
-from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
+from utils.leaderboard_image import (
+    LeaderboardImageRow,
+    make_leaderboard_file,
+    make_profile_file,
+    resolve_avatar_bytes,
+    resolve_display_name,
+)
 
 logger = logging.getLogger(__name__)
+PROFILE_BADGES = {"voice": "🎙️", "champion": "🏆", "idea": "💡", "season_one": "◆"}
+PROFILE_ACCENTS = {"rose": (217, 103, 157), "plum": (151, 103, 132), "gold": (214, 183, 110)}
 
 
 class LevelsCog(commands.Cog):
@@ -47,43 +55,86 @@ class LevelsCog(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None or not self.bot.db:
             return
+        automod = self.bot.get_cog("AutomodCog")
+        if automod is not None and not await automod.allows_progress(message):
+            return
         content = (message.content or "").strip()
         if len(content) < self.bot.settings.min_message_length:
             return
 
-        _, level, level_up = await self.bot.levels.update_level_progress(
+        message_count, level, level_up, counted = await self.bot.levels.update_level_progress(
             self.bot.db,
             message.guild.id,
             message.author.id,
             datetime.now(UTC),
         )
+        privacy = await self.bot.social_games.get_privacy_settings(
+            self.bot.db, message.guild.id, message.author.id
+        )
+        if counted and privacy["analytics_enabled"] and self.bot.progression_db is not None:
+            await self.bot.progression.record_event(
+                self.bot.progression_db,
+                message.guild.id,
+                message.author.id,
+                "message",
+                1,
+                f"message:{message.channel.id}:{message.id}",
+            )
+            if datetime.now(UTC).hour in {22, 23, 0, 1, 2, 3, 4}:
+                await self.bot.progression.record_event(
+                    self.bot.progression_db,
+                    message.guild.id,
+                    message.author.id,
+                    "message_night",
+                    1,
+                    f"message-night:{message.channel.id}:{message.id}",
+                )
+            if level_up:
+                await self.bot.progression.record_event(
+                    self.bot.progression_db,
+                    message.guild.id,
+                    message.author.id,
+                    "level_up",
+                    1,
+                    f"level-up:{message.guild.id}:{message.author.id}:{level}",
+                )
         if level_up:
-            await self._send_level_up_message(message, level)
+            await self._send_level_up_message(message, level, message_count)
 
-    async def _send_level_up_message(self, message: discord.Message, level: int) -> None:
-        motivation = self._get_random_level_up_text()
-        gif_url = self._get_random_level_up_gif()
-
-        embed = discord.Embed(
-            title="╭──── ✦ LEVEL UP ✦ ────╮",
-            description=(
-                f"🎉 Поздравляем, {message.author.mention}!\n\n"
-                f"✨ Достигнут новый уровень: **{level}**\n\n"
-                f"{motivation}\n\n"
-                "╰──────────────────────╯"
-            ),
-            color=discord.Color.from_rgb(255, 128, 191),
-            timestamp=datetime.now(UTC),
+    async def _send_level_up_message(self, message: discord.Message, level: int, message_count: int) -> None:
+        current_required = required_messages_for_level(level)
+        next_level = min(self.bot.settings.max_level, level + 1)
+        next_required = required_messages_for_level(next_level)
+        span = max(next_required - current_required, 1)
+        progress = 1.0 if level >= self.bot.settings.max_level else (message_count - current_required) / span
+        reward = 50 + level * 10
+        if self.bot.economy_db is not None and message.guild is not None:
+            await self.bot.economy.change_balance(
+                self.bot.economy_db,
+                message.guild.id,
+                message.author.id,
+                reward,
+                reason="level_up_reward",
+                xp=level * 2,
+                idempotency_key=f"level-up:{message.guild.id}:{message.author.id}:{level}",
+            )
+        avatar = await resolve_avatar_bytes(self.bot, message.guild, message.author.id)
+        customization = await self.bot.progression.get_profile_customization(
+            self.bot.progression_db, message.guild.id, message.author.id
         )
-        embed.set_thumbnail(url=message.author.display_avatar.url)
-        if gif_url:
-            embed.set_image(url=gif_url)
-        embed.set_footer(text="Продолжай быть активным участником сервера")
-
-        await message.channel.send(
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True),
+        badge = PROFILE_BADGES.get(str(customization.get("badge_key") or ""), "")
+        file = make_profile_file(
+            f"{message.author.display_name} {badge}".strip(),
+            "Новый уровень",
+            (("Уровень", str(level)), ("Сообщений", str(message_count)), ("Награда", f"{reward} монет")),
+            avatar=avatar,
+            progress=progress,
+            theme=str(customization.get("background_key") or random.choice(("levels", "neutral", "reputation", "events"))),
+            accent=PROFILE_ACCENTS.get(str(customization.get("accent_key") or "")),
+            filename="level_up.png",
+            description=f"{message.author.display_name} достиг(ла) уровня {level}",
         )
+        await message.channel.send(file=file, allowed_mentions=discord.AllowedMentions.none())
 
     @app_commands.command(name="rank", description="Показать уровень пользователя")
     async def rank(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
@@ -108,12 +159,29 @@ class LevelsCog(commands.Cog):
             next_req = required_messages_for_level(next_level)
             progress_text = f"{message_count - current_req}/{next_req - current_req} сообщений"
 
-        embed = discord.Embed(title=f"Ранг: {target.display_name}", color=discord.Color.blurple())
-        embed.add_field(name="Уровень", value=str(level), inline=True)
-        embed.add_field(name="Сообщений", value=str(message_count), inline=True)
-        embed.add_field(name="Прогресс", value=progress_text, inline=False)
-        embed.set_thumbnail(url=target.display_avatar.url)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.defer()
+        rank_position = await self.bot.levels.get_rank_position(self.bot.db, guild.id, target.id)
+        avatar = await resolve_avatar_bytes(self.bot, guild, target.id)
+        customization = await self.bot.progression.get_profile_customization(self.bot.progression_db, guild.id, target.id)
+        badge = PROFILE_BADGES.get(str(customization.get("badge_key") or ""), "")
+        if level >= self.bot.settings.max_level:
+            progress = 1.0
+        else:
+            current_req = required_messages_for_level(level)
+            next_req = required_messages_for_level(next_level)
+            progress = (message_count - current_req) / max(next_req - current_req, 1)
+        file = make_profile_file(
+            f"{target.display_name} {badge}".strip(),
+            "Ранг участника",
+            (("Уровень", str(level)), ("Сообщений", str(message_count)), ("Место", f"#{rank_position}"), ("До уровня", progress_text)),
+            avatar=avatar,
+            progress=progress,
+            theme=str(customization.get("background_key") or "levels"),
+            accent=PROFILE_ACCENTS.get(str(customization.get("accent_key") or "")),
+            filename="rank.png",
+            description=f"Ранг {target.display_name}: уровень {level}, место {rank_position}",
+        )
+        await interaction.followup.send(file=file, allowed_mentions=discord.AllowedMentions.none())
 
     async def top(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
@@ -131,20 +199,20 @@ class LevelsCog(commands.Cog):
             level = int(row["level"])
             message_count = int(row["message_count"])
             name = await resolve_display_name(self.bot, guild, int(row["user_id"]))
+            avatar = await resolve_avatar_bytes(self.bot, guild, int(row["user_id"]))
             leaderboard_rows.append(
                 LeaderboardImageRow(
                     name=name,
                     primary=f"Уровень {level}",
                     secondary=f"{message_count} сообщений",
                     value=message_count,
+                    avatar=avatar,
                 )
             )
 
         try:
             filename = "levels_top.png"
-            file = make_leaderboard_file("ТОП УРОВНЕЙ", leaderboard_rows, filename=filename)
-            embed = discord.Embed(title="Топ уровней", color=discord.Color.purple())
-            embed.set_image(url=f"attachment://{filename}")
+            file = make_leaderboard_file("ТОП УРОВНЕЙ", leaderboard_rows, filename=filename, theme="levels")
         except Exception:
             logger.exception("Failed to generate levels top image")
             await interaction.followup.send(
@@ -154,7 +222,6 @@ class LevelsCog(commands.Cog):
             return
 
         await interaction.followup.send(
-            embed=embed,
             file=file,
             allowed_mentions=discord.AllowedMentions.none(),
         )

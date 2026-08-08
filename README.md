@@ -1,6 +1,31 @@
-# Pohabshina Bot
+# Vulgarities Bot
+
+## Локальные функции без отдельного backend
+
+Все новые игровые и серверные модули работают в процессе Discord-бота и хранят состояние в SQLite:
+
+- `/achievements`, `/collection`, `/customize` — достижения, коллекция и оформление `/rank`;
+- `/season`, `/serverquest`, `/club_war` — сезоны, общие задания и клубная лига;
+- `/pet_evolve`, `/pet_raid`, `/pet_equipment`, `/pet_equip` — развитие, рейд и экипировка питомца;
+- `/suggestion` и `/digest` — предложения с голосованием и еженедельная PNG-статистика;
+- `/automod` — локальные правила спама и raid guard; по умолчанию выключен, безопасный режим — только журнал;
+- `/giveaway`, `/starboard`, `/anime_feed` — восстановление после рестарта и защита от повторных публикаций.
+
+Перед новыми миграциями автоматически создаются резервные копии основной SQLite и `weddings.db`. Внешняя веб-панель, Redis и отдельный сервер не требуются.
 
 Discord-бот на **discord.py 2.x** с системой кино-подборок, модерацией, уровнями, репутацией, reaction roles, технической поддержкой (тикеты) и shop-панелью услуг.
+
+Видимый бренд — **Vulgarities Bot**. Техническое имя репозитория и существующий GHCR image сохранены, чтобы не ломать развёртывание.
+
+### Новые игровые модули
+
+- image-only `/rank`, level-up и `/top levels|messages|reputation|economy|pets|clubs|relations|pairs|events` на оригинальных локальных Dark anime glam фонах;
+- серверная экономика: кошелёк, банк, магазин, инвентарь, рынок, задания, достижения и сезонные события;
+- PvE/PvP питомцев, рейтинг и награды; клубные сообщества с заявками, участниками и банком;
+- 64 SFW RP-действия через `/rp act`; NSFW RP по умолчанию закрыто и требует разрешения сервера, NSFW-канал и согласие обоих участников;
+- restart-safe starboard, розыгрыши с persistent-кнопкой и anime feed через AniList.
+
+Имя, описание и аватар приложения в Discord Developer Portal меняются вручную — токен и application ID при этом остаются прежними.
 
 ## Что умеет бот
 
@@ -237,7 +262,8 @@ AI_USER_COOLDOWN_SECONDS=120
 AI_DAILY_LIMIT=700
 AI_CONTEXT_LIMIT_CHARS=1500
 AI_MEMORY_DAYS=30
-AI_BOT_ALIASES=мурка,бот,пахабщина,пахаб
+BOT_DISPLAY_NAME=Vulgarities Bot
+AI_BOT_ALIASES=vulgarities,vulgarities bot,бот,пахабщина,пахаб
 AI_ENABLE_MEMORY=true
 AI_ENABLE_RANDOM_REPLIES=true
 AI_ENABLE_REACTIONS=true
@@ -268,7 +294,7 @@ OLLAMA_MODEL=gemma3
 | `AI_DAILY_LIMIT` | `700` | Максимум AI-запросов в сутки на сервер. Хранится в SQLite в `ai_usage_daily`. |
 | `AI_CONTEXT_LIMIT_CHARS` | `1500` | Максимальный размер локального контекста, который добавляется к prompt: память канала, память пользователя, relation и mood. |
 | `AI_MEMORY_DAYS` | `30` | Сколько дней хранить AI-память сообщений. Старые записи чистятся при запуске AI cog. |
-| `AI_BOT_ALIASES` | `мурка,бот,пахабщина,пахаб` | Слова, на которые бот реагирует как на обращение к себе без прямого Discord mention. Разделитель - запятая. |
+| `AI_BOT_ALIASES` | `vulgarities,vulgarities bot,бот,пахабщина,пахаб` | Слова, на которые бот реагирует как на обращение к себе без прямого Discord mention. Старые алиасы временно сохранены для совместимости. |
 | `AI_ENABLE_MEMORY` | `true` | Включает сохранение очищенных сообщений в AI-enabled каналах. Не сохраняет ботов, команды, слишком короткий текст, invite/email/телефоны/tokens в открытом виде. |
 | `AI_ENABLE_RANDOM_REPLIES` | `true` | Глобальный env-дефолт для редких случайных ответов. На сервере можно переопределить через `/ai_config random_replies`. |
 | `AI_ENABLE_REACTIONS` | `true` | Глобальный env-дефолт для локальных реакций без AI-запроса. На сервере можно переопределить через `/ai_config reactions`. |

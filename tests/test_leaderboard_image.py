@@ -5,7 +5,12 @@ from utils.leaderboard_image import (
     draw_leaderboard_image,
     load_font_stack,
     sanitize_leaderboard_name,
+    draw_profile_card,
 )
+from PIL import Image
+import io
+import asyncio
+from utils.leaderboard_image import resolve_avatar_bytes
 
 
 UNICODE_NAMES = [
@@ -33,6 +38,14 @@ def test_leaderboard_name_font_stack_supports_unicode_names() -> None:
     assert unsupported == []
 
 
+def test_dm_sans_is_the_primary_interface_font() -> None:
+    font_stack = load_font_stack(27, bold=True)
+
+    assert font_stack.fonts[0].path is not None
+    assert font_stack.fonts[0].path.name == "DMSans-Variable.ttf"
+    assert font_stack.supports_text("Vulgarities Bot · Уровень 42")
+
+
 def test_leaderboard_image_renders_unicode_names() -> None:
     rows = [
         LeaderboardImageRow(
@@ -47,3 +60,91 @@ def test_leaderboard_image_renders_unicode_names() -> None:
     image = draw_leaderboard_image("Unicode Test", rows)
 
     assert image.getbuffer().nbytes > 10_000
+
+
+def test_branded_leaderboard_dimensions_and_discord_limit() -> None:
+    for count in (0, 1, 10):
+        rows = [
+            LeaderboardImageRow(
+                name=f"Очень длинное имя игрока №{index} 🔥✨ с хвостом",
+                primary=f"Уровень {index}",
+                secondary="Кириллица и emoji работают",
+                value=100 - index,
+            )
+            for index in range(count)
+        ]
+        payload = draw_leaderboard_image("ТОП УЧАСТНИКОВ", rows)
+        with Image.open(io.BytesIO(payload.getvalue())) as image:
+            assert image.size == (1600, 1200)
+        assert payload.getbuffer().nbytes < 8 * 1024 * 1024
+
+
+def test_rank_and_level_up_card_dimensions() -> None:
+    payload = draw_profile_card(
+        "Игрок_Алекс 🔥",
+        "Новый уровень 42",
+        (("Место", "#1"), ("Опыт", "1200 / 1500")),
+        progress=0.8,
+        theme="levels",
+    )
+    with Image.open(io.BytesIO(payload.getvalue())) as image:
+        assert image.size == (1200, 675)
+    assert payload.getbuffer().nbytes < 8 * 1024 * 1024
+
+
+def test_profile_card_accepts_unlocked_accent_color() -> None:
+    payload = draw_profile_card(
+        "Александра",
+        "Ранг участника",
+        (("Уровень", "42"),),
+        progress=0.75,
+        theme="levels",
+        accent=(214, 183, 110),
+    )
+
+    with Image.open(io.BytesIO(payload.getvalue())) as image:
+        assert image.getpixel((200, 520))[0] > image.getpixel((200, 520))[2]
+
+
+def test_avatar_download_is_cached_and_has_safe_fallback() -> None:
+    class Avatar:
+        def __init__(self, key: str, *, fails: bool = False) -> None:
+            self.key = key
+            self.url = f"https://example.invalid/{key}.png"
+            self.fails = fails
+            self.reads = 0
+
+        def with_size(self, _: int):
+            return self
+
+        async def read(self) -> bytes:
+            self.reads += 1
+            if self.fails:
+                raise OSError("offline")
+            return b"avatar"
+
+    class User:
+        def __init__(self, avatar: Avatar) -> None:
+            self.display_avatar = avatar
+
+    class Bot:
+        def __init__(self, user: User) -> None:
+            self.user = user
+
+        def get_user(self, _: int):
+            return self.user
+
+    async def scenario() -> None:
+        avatar = Avatar("cache-success")
+        bot = Bot(User(avatar))
+        assert await resolve_avatar_bytes(bot, None, 987001) == b"avatar"
+        assert await resolve_avatar_bytes(bot, None, 987001) == b"avatar"
+        assert avatar.reads == 1
+
+        missing = Avatar("cache-fallback", fails=True)
+        missing_bot = Bot(User(missing))
+        assert await resolve_avatar_bytes(missing_bot, None, 987002) is None
+        assert await resolve_avatar_bytes(missing_bot, None, 987002) is None
+        assert missing.reads == 1
+
+    asyncio.run(scenario())

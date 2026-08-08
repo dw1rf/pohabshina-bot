@@ -1,0 +1,21 @@
+{
+  "brand": "Vulgarities Bot",
+  "style": "Dark anime glam",
+  "generated_with": "OpenAI built-in image generation",
+  "constraints": [
+    "original characters only",
+    "SFW",
+    "no text or logos",
+    "no Nekotina characters or assets"
+  ],
+  "assets": {
+    "levels": {"file": "levels.png", "sha256": "1c25b464306a2437cc8474a3d0045e5a5678ea8b9d4ca8156cec5c3679ee3350", "source": "regenerated editorial anime-noir background v2"},
+    "economy": {"file": "economy.png", "sha256": "414dab48ffff82b4f0831e5f75ad7ae6f524778f88c42ecd0b61b653b4b5ff97"},
+    "reputation": {"file": "reputation.png", "sha256": "27e76db521f4bd0f8fce97f27196cb82a43152ae8d811e9d39de98d1ccda1f64"},
+    "pets": {"file": "pets.png", "sha256": "f987fe8217eb589f25378175493a04c628f9bf027cccc6eb93a58fc1f5ab5c5c"},
+    "clubs": {"file": "clubs.png", "sha256": "8fa8cf103e9ae171096a840c2d71eecb6a82985dcf0a56d9cafd05a18b2a37c1"},
+    "relationships": {"file": "relationships.png", "sha256": "87adb9b033809135f1eff7a154140eda291c12b3da9cfcd7be0cb5b323ec28c9"},
+    "events": {"file": "events.png", "sha256": "62db04a4d596a911681ee4ef95f2c477719f5ccb0a65178fd026c9c3b7c3a4eb"},
+    "neutral": {"file": "neutral.png", "sha256": "5050d7d0dbe91048390b59190208381b199ba642a8ef63d73c249de2cf13402b"}
+  }
+}

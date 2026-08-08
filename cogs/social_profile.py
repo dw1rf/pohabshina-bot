@@ -173,6 +173,9 @@ class SocialProfileCog(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if message.guild is None or message.author.bot or self.bot.db is None:
             return
+        automod = self.bot.get_cog("AutomodCog")
+        if automod is not None and not await automod.allows_progress(message):
+            return
         try:
             settings = await self.bot.social_games.ensure_guild_settings(self.bot.db, message.guild.id)
             if not settings["profile_analytics_enabled"]:
@@ -523,6 +526,10 @@ class SocialProfileCog(commands.Cog):
             await interaction.response.send_message("Только на сервере.", ephemeral=True)
             return
         await self.bot.social_games.forget_profile_data(self.bot.db, interaction.guild.id, interaction.user.id)
+        if self.bot.progression_db is not None:
+            await self.bot.progression.forget_user_progress(
+                self.bot.progression_db, interaction.guild.id, interaction.user.id
+            )
         await interaction.response.send_message("Данные профиля удалены, аналитика отключена.", ephemeral=True)
 
 

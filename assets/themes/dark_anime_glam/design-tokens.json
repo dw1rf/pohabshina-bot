@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "typography": {
+    "family": "DM Sans",
+    "fallbacks": ["Noto Sans", "Noto Sans CJK", "Noto Color Emoji"],
+    "weights": {"regular": 400, "semibold": 600, "bold": 700}
+  },
+  "color": {
+    "ink": "#090A0E",
+    "surface": "rgba(20, 18, 23, 0.56)",
+    "surfaceAlternate": "rgba(28, 25, 30, 0.56)",
+    "text": "#FAF7F9",
+    "muted": "#A89DA6",
+    "accent": "#D9679D",
+    "gold": "#E5B15C",
+    "silver": "#B3BBC7",
+    "bronze": "#BE8263"
+  },
+  "spacing": [4, 8, 12, 16, 24, 32, 48, 72],
+  "radius": {"row": 10, "progress": 5},
+  "rules": {
+    "outerFrames": false,
+    "rowOutlines": false,
+    "leaderboardColumns": 3,
+    "progressBarsInLeaderboard": false,
+    "characterSafeArea": "right 25%",
+    "contentSafeArea": "left 70%"
+  }
+}
