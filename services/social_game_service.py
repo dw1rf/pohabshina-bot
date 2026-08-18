@@ -25,6 +25,7 @@ class SocialGameService:
             CREATE TABLE IF NOT EXISTS guild_settings (
                 guild_id INTEGER PRIMARY KEY,
                 nsfw_rp_enabled INTEGER NOT NULL DEFAULT 0,
+                nsfw_channel_id INTEGER NOT NULL DEFAULT 0,
                 profile_analytics_enabled INTEGER NOT NULL DEFAULT 1,
                 matchmaking_enabled INTEGER NOT NULL DEFAULT 1,
                 story_nsfw_enabled INTEGER NOT NULL DEFAULT 0,
@@ -213,6 +214,7 @@ class SocialGameService:
             );
             """
         )
+        await self._migrate_guild_settings(db)
         await self._migrate_privacy_defaults(db)
         await self._migrate_activity_schema(db)
         await self._migrate_pet_battles(db)
@@ -222,6 +224,17 @@ class SocialGameService:
             (utcnow_iso(),),
         )
         await db.commit()
+
+    async def _migrate_guild_settings(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(guild_settings)")
+        columns = {
+            str(row["name"] if isinstance(row, aiosqlite.Row) else row[1])
+            for row in await cursor.fetchall()
+        }
+        if "nsfw_channel_id" not in columns:
+            await db.execute(
+                "ALTER TABLE guild_settings ADD COLUMN nsfw_channel_id INTEGER NOT NULL DEFAULT 0"
+            )
 
     async def _migrate_pet_battles(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(pets)")
@@ -363,10 +376,29 @@ class SocialGameService:
         return row
 
     async def set_guild_flag(self, db: aiosqlite.Connection, guild_id: int, field: str, value: int) -> None:
-        if field not in {"nsfw_rp_enabled", "profile_analytics_enabled", "matchmaking_enabled", "story_nsfw_enabled", "log_channel_id", "adult_role_id"}:
+        if field not in {"nsfw_rp_enabled", "nsfw_channel_id", "profile_analytics_enabled", "matchmaking_enabled", "story_nsfw_enabled", "log_channel_id", "adult_role_id"}:
             raise ValueError("Unsupported guild setting")
         await self.ensure_guild_settings(db, guild_id)
         await db.execute(f"UPDATE guild_settings SET {field} = ?, updated_at = ? WHERE guild_id = ?", (value, utcnow_iso(), guild_id))
+        await db.commit()
+
+    async def set_nsfw_channel(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+        channel_id: int,
+    ) -> None:
+        await self.ensure_guild_settings(db, guild_id)
+        await db.execute(
+            """
+            UPDATE guild_settings
+            SET nsfw_channel_id = ?,
+                nsfw_rp_enabled = CASE WHEN ? > 0 THEN 1 ELSE nsfw_rp_enabled END,
+                updated_at = ?
+            WHERE guild_id = ?
+            """,
+            (channel_id, channel_id, utcnow_iso(), guild_id),
+        )
         await db.commit()
 
     async def ensure_privacy(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> aiosqlite.Row:

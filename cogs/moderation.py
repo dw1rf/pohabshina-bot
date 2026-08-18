@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 JAIL_CATEGORY_NAME = "🔒-тюрьма"
 JAIL_ROLE_NAME = "🔒 Заключённый"
 JAIL_SLOWMODE_SECONDS = 30
+JAIL_PERMISSION_SYNC_CONCURRENCY = 4
 JAIL_APPEAL_BUTTON_ID = "moderation:jail:appeal"
 JAIL_TIME_BUTTON_ID = "moderation:jail:remaining"
 
@@ -191,21 +192,61 @@ class ModerationCog(commands.Cog):
         jail_role: discord.Role,
         jail_category: discord.CategoryChannel,
     ) -> None:
-        overwrite = discord.PermissionOverwrite(
-            view_channel=False,
-            send_messages=False,
-            add_reactions=False,
-            connect=False,
-            speak=False,
-            mention_everyone=False,
-        )
+        required_permissions = {
+            "view_channel": False,
+            "send_messages": False,
+            "add_reactions": False,
+            "connect": False,
+            "speak": False,
+            "mention_everyone": False,
+        }
+        channels_to_update: list[
+            tuple[discord.abc.GuildChannel, discord.PermissionOverwrite]
+        ] = []
+
         for channel in guild.channels:
-            if channel.id == jail_category.id or getattr(channel, "category_id", None) == jail_category.id:
+            category_id = getattr(channel, "category_id", None)
+            if channel.id == jail_category.id or category_id == jail_category.id:
                 continue
+
+            # A synced child inherits its category overwrites. Updating both the
+            # category and every synced child only creates duplicate Discord API
+            # calls and can make /jail take tens of seconds on a large server.
+            if category_id is not None and getattr(channel, "permissions_synced", False):
+                continue
+
+            overwrite = channel.overwrites_for(jail_role)
+            if all(getattr(overwrite, name) is value for name, value in required_permissions.items()):
+                continue
+
+            overwrite.update(**required_permissions)
+            channels_to_update.append((channel, overwrite))
+
+        semaphore = asyncio.Semaphore(JAIL_PERMISSION_SYNC_CONCURRENCY)
+
+        async def apply_overwrite(
+            channel: discord.abc.GuildChannel,
+            overwrite: discord.PermissionOverwrite,
+        ) -> None:
             try:
-                await channel.set_permissions(jail_role, overwrite=overwrite, reason="Jail role channel lock")
+                async with semaphore:
+                    await channel.set_permissions(
+                        jail_role,
+                        overwrite=overwrite,
+                        reason="Jail role channel lock",
+                    )
             except (discord.Forbidden, discord.HTTPException) as exc:
-                logger.warning("Failed to lock channel for jail role: guild=%s channel=%s error=%s", guild.id, channel.id, exc)
+                logger.warning(
+                    "Failed to lock channel for jail role: guild=%s channel=%s error=%s",
+                    guild.id,
+                    channel.id,
+                    exc,
+                )
+
+        if channels_to_update:
+            await asyncio.gather(
+                *(apply_overwrite(channel, overwrite) for channel, overwrite in channels_to_update)
+            )
 
     async def _create_jail_channel(
         self,
@@ -277,7 +318,38 @@ class ModerationCog(commands.Cog):
             "3. Вести себя тихо.\n\n"
             "⚠️ Нарушение правил в тюрьме = продление срока."
         )
-        await channel.send(content=user.mention, embed=embed, view=JailView(self), allowed_mentions=discord.AllowedMentions(users=True))
+        view = JailView(self)
+        allowed_mentions = discord.AllowedMentions(
+            everyone=False,
+            users=[user],
+            roles=False,
+            replied_user=False,
+        )
+        try:
+            await channel.send(
+                content=user.mention,
+                embed=embed,
+                view=view,
+                allowed_mentions=allowed_mentions,
+            )
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Failed to send jail embed, retrying as text: channel=%s error=%s",
+                channel.id,
+                exc,
+            )
+            await channel.send(
+                content=(
+                    f"🔒 {user.mention}, вы отправлены в изолятор.\n"
+                    f"⛔ Причина: {truncate_text(reason, 700)}\n"
+                    f"⏰ Срок: {_duration_label(duration)}\n"
+                    f"🔓 Освобождение: {expires_at.strftime('%H:%M')}\n\n"
+                    "📝 Подать апелляцию — нажмите кнопку ниже.\n"
+                    "⏳ Узнать оставшееся время — нажмите соседнюю кнопку."
+                ),
+                view=view,
+                allowed_mentions=allowed_mentions,
+            )
 
     async def _resume_active_jails(self) -> None:
         await self.bot.wait_until_ready()
@@ -654,8 +726,22 @@ class ModerationCog(commands.Cog):
             expires_at=expires_at.isoformat(),
         )
         self._schedule_jail_release(record)
-        await self._send_jail_intro(channel, user, reason, delta, expires_at)
         await self._safe_reply(interaction, f"🔒 Пользователь {user.mention} отправлен в тюрьму на {duration}. Канал: {channel.mention}")
+        try:
+            await self._send_jail_intro(channel, user, reason, delta, expires_at)
+        except discord.HTTPException as exc:
+            logger.exception(
+                "Failed to send jail intro: guild=%s user=%s channel=%s",
+                guild.id,
+                user.id,
+                channel.id,
+                exc_info=exc,
+            )
+            await self._safe_reply(
+                interaction,
+                f"Тюрьма создана, но Discord не дал отправить памятку в {channel.mention}. "
+                "Проверьте права Send Messages и Embed Links у бота.",
+            )
         await self._safe_mod_log(
             guild,
             "jail",

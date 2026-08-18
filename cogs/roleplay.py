@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import logging
+import asyncio
 import json
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -46,6 +47,15 @@ def _load_sfw_actions() -> dict[str, dict[str, str | bool]]:
 
 
 SFW_ACTIONS = _load_sfw_actions()
+
+
+def _is_nsfw_channel_allowed(channel: object | None, configured_channel_id: int) -> bool:
+    if channel is None:
+        return False
+    is_nsfw = getattr(channel, "is_nsfw", None)
+    if not callable(is_nsfw) or not is_nsfw():
+        return False
+    return not configured_channel_id or getattr(channel, "id", 0) == configured_channel_id
 
 
 def _is_valid_command_name(name: str) -> bool:
@@ -197,8 +207,16 @@ class RoleplayCog(commands.Cog):
                 if not bool(settings["nsfw_rp_enabled"]):
                     await interaction.response.send_message("NSFW RP выключено администрацией сервера.", ephemeral=True)
                     return
-                if not getattr(interaction.channel, "is_nsfw", lambda: False)():
-                    await interaction.response.send_message("Эта команда доступна только в NSFW-канале.", ephemeral=True)
+                nsfw_channel_id = int(settings["nsfw_channel_id"] or 0)
+                if not _is_nsfw_channel_allowed(interaction.channel, nsfw_channel_id):
+                    if nsfw_channel_id:
+                        text = f"NSFW-команды доступны только в <#{nsfw_channel_id}>."
+                    else:
+                        text = (
+                            "Эта команда доступна только в канале Discord с отметкой 18+. "
+                            "Администратор может выбрать его через `/set_nsfw_channel`."
+                        )
+                    await interaction.response.send_message(text, ephemeral=True)
                     return
                 author_ok = await self.bot.social_games.has_rp_consent(self.bot.db, interaction.guild.id, author.id, nsfw=True)
                 target_ok = await self.bot.social_games.has_rp_consent(self.bot.db, interaction.guild.id, target.id, nsfw=True)
@@ -228,16 +246,7 @@ class RoleplayCog(commands.Cog):
                 description=description,
                 color=discord.Color.purple() if nsfw else discord.Color.blurple(),
             )
-            count = 1
-            if self.bot.db is not None:
-                count = await self.bot.social_games.increment_rp_action(
-                    self.bot.db, interaction.guild.id, author.id, target.id, action_key
-                )
-                await self.bot.progression.record_event(
-                    self.bot.progression_db, interaction.guild.id, author.id, "rp_action", 1,
-                    f"rp:{interaction.id}:{action_key}", metadata={"action": action_key},
-                )
-            embed.set_footer(text=f"Это взаимодействие между вами: {count}")
+            embed.set_footer(text="RP-взаимодействие")
             image_path = Path(str(payload.get("image", "")))
             if not nsfw and image_path.is_file():
                 file = discord.File(image_path, filename="rp_scene.png", description=f"SFW RP: {payload['label']}")
@@ -245,6 +254,35 @@ class RoleplayCog(commands.Cog):
                 await interaction.response.send_message(embed=embed, file=file)
             else:
                 await interaction.response.send_message(embed=embed)
+
+            # Counters and achievements are optional telemetry. They must never
+            # turn a successfully rendered RP action into a failed command.
+            if self.bot.db is not None:
+                try:
+                    async with asyncio.timeout(5):
+                        await self.bot.social_games.increment_rp_action(
+                            self.bot.db,
+                            interaction.guild.id,
+                            author.id,
+                            target.id,
+                            action_key,
+                        )
+                        if self.bot.progression_db is not None:
+                            await self.bot.progression.record_event(
+                                self.bot.progression_db,
+                                interaction.guild.id,
+                                author.id,
+                                "rp_action",
+                                1,
+                                f"rp:{interaction.id}:{action_key}",
+                                metadata={"action": action_key},
+                            )
+                except Exception:
+                    logger.exception(
+                        "RP telemetry failed after response: guild=%s action=%s",
+                        interaction.guild.id,
+                        action_key,
+                    )
         except Exception:
             logger.exception("RP action failed: guild=%s action=%s", getattr(interaction.guild, "id", None), action_key)
             if interaction.response.is_done():

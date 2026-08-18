@@ -21,6 +21,11 @@ class SettingsCog(commands.Cog):
         row = await self.bot.social_games.ensure_guild_settings(self.bot.db, guild_id)
         embed = discord.Embed(title=f"Настройки {BRAND_NAME}", color=discord.Color.blurple())
         embed.add_field(name="NSFW RP", value=enabled_text(bool(row["nsfw_rp_enabled"])), inline=True)
+        embed.add_field(
+            name="NSFW-канал",
+            value=f"<#{row['nsfw_channel_id']}>" if row["nsfw_channel_id"] else "не выбран",
+            inline=True,
+        )
         embed.add_field(name="Аналитика профилей", value=enabled_text(bool(row["profile_analytics_enabled"])), inline=True)
         embed.add_field(name="Matchmaking", value=enabled_text(bool(row["matchmaking_enabled"])), inline=True)
         embed.add_field(name="NSFW story", value=enabled_text(bool(row["story_nsfw_enabled"])), inline=True)
@@ -47,6 +52,40 @@ class SettingsCog(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def set_nsfw_rp(self, interaction: discord.Interaction, enabled: bool) -> None:
         await self._set_bool(interaction, "nsfw_rp_enabled", enabled, "NSFW RP")
+
+    @app_commands.command(name="set_nsfw_channel", description="Выбрать единственный канал для NSFW-команд")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def set_nsfw_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if interaction.guild is None or self.bot.db is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        if channel is not None and not channel.is_nsfw():
+            await interaction.response.send_message(
+                "Сначала включите для канала ограничение 18+ в настройках Discord.",
+                ephemeral=True,
+            )
+            return
+
+        channel_id = channel.id if channel is not None else 0
+        await self.bot.social_games.set_nsfw_channel(
+            self.bot.db,
+            interaction.guild.id,
+            channel_id,
+        )
+        if channel is None:
+            text = "Выбранный NSFW-канал сброшен. Работают обычные каналы Discord с отметкой 18+."
+        else:
+            text = f"NSFW-команды включены только в {channel.mention}."
+        await interaction.response.send_message(
+            text,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @app_commands.command(name="set_profile_analytics", description="Включить или выключить аналитику профилей")
     @app_commands.default_permissions(administrator=True)
