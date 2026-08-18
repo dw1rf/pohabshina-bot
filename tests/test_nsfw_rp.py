@@ -26,6 +26,26 @@ def test_native_nsfw_channel_remains_fallback_until_admin_selects_one() -> None:
     assert not _is_nsfw_channel_allowed(regular, 0)
 
 
+def test_dynamic_rp_commands_have_no_discord_cooldown() -> None:
+    cog = object.__new__(RoleplayCog)
+    cog.bot = SimpleNamespace()
+
+    callback = cog._make_callback("test_action")
+
+    assert not getattr(callback, "__discord_app_commands_checks__", [])
+
+
+def test_obsolete_rp_consent_command_is_not_registered() -> None:
+    assert all(command.name != "consent" for command in RoleplayCog.rp_group.commands)
+
+
+def test_obsolete_nsfw_toggle_and_adult_role_commands_are_not_registered() -> None:
+    command_names = {command.name for command in SettingsCog.__cog_app_commands__}
+
+    assert "set_nsfw_rp" not in command_names
+    assert "set_adult_role" not in command_names
+
+
 def test_admin_can_select_nsfw_channel_and_enable_commands() -> None:
     async def scenario() -> None:
         set_nsfw_channel = AsyncMock()
@@ -104,7 +124,6 @@ def test_rp_action_still_replies_when_optional_telemetry_fails() -> None:
         )
         cog = object.__new__(RoleplayCog)
         cog.bot = bot
-        cog._target_cooldowns = {}
 
         author = Mock(spec=discord.Member)
         author.id = 1
@@ -136,5 +155,107 @@ def test_rp_action_still_replies_when_optional_telemetry_fails() -> None:
         response.send_message.assert_awaited_once()
         assert "embed" in response.send_message.await_args.kwargs
         assert "ephemeral" not in response.send_message.await_args.kwargs
+
+    asyncio.run(scenario())
+
+
+def test_nsfw_action_allows_bot_self_target_without_consent_or_role() -> None:
+    class SocialGames:
+        async def ensure_guild_settings(self, _db: object, _guild_id: int) -> dict[str, int]:
+            return {
+                "nsfw_rp_enabled": 0,
+                "nsfw_channel_id": 777,
+                "adult_role_id": 123,
+            }
+
+        async def increment_rp_action(self, *_args: object) -> int:
+            return 1
+
+    async def scenario() -> None:
+        bot = SimpleNamespace(
+            db=object(),
+            progression_db=None,
+            social_games=SocialGames(),
+        )
+        cog = object.__new__(RoleplayCog)
+        cog.bot = bot
+
+        author = Mock(spec=discord.Member)
+        author.id = 1
+        author.mention = "<@1>"
+        author.bot = True
+        response = SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False)
+        interaction = SimpleNamespace(
+            id=1000,
+            guild=SimpleNamespace(id=10),
+            user=author,
+            channel=SimpleNamespace(id=777, is_nsfw=lambda: True),
+            response=response,
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await cog._execute_action(
+            interaction,
+            "test_nsfw",
+            author,
+            None,
+            {"label": "test", "text": "test action", "nsfw": True},
+        )
+
+        response.send_message.assert_awaited_once()
+        assert "embed" in response.send_message.await_args.kwargs
+        assert "ephemeral" not in response.send_message.await_args.kwargs
+
+    asyncio.run(scenario())
+
+
+def test_rp_action_can_repeat_without_target_cooldown() -> None:
+    class SocialGames:
+        async def ensure_guild_settings(self, _db: object, _guild_id: int) -> dict[str, int]:
+            return {
+                "nsfw_rp_enabled": 1,
+                "nsfw_channel_id": 777,
+                "adult_role_id": 0,
+            }
+
+        async def increment_rp_action(self, *_args: object) -> int:
+            return 1
+
+    async def scenario() -> None:
+        bot = SimpleNamespace(db=object(), progression_db=None, social_games=SocialGames())
+        cog = object.__new__(RoleplayCog)
+        cog.bot = bot
+
+        author = Mock(spec=discord.Member)
+        author.id = 1
+        author.mention = "<@1>"
+        target = Mock(spec=discord.Member)
+        target.id = 2
+        target.mention = "<@2>"
+        target.bot = False
+
+        responses = []
+        for interaction_id in (1001, 1002):
+            response = SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False)
+            interaction = SimpleNamespace(
+                id=interaction_id,
+                guild=SimpleNamespace(id=10),
+                user=author,
+                channel=SimpleNamespace(id=777, is_nsfw=lambda: True),
+                response=response,
+                followup=SimpleNamespace(send=AsyncMock()),
+            )
+            await cog._execute_action(
+                interaction,
+                "test_nsfw",
+                target,
+                None,
+                {"label": "test", "text": "test action", "nsfw": True},
+            )
+            responses.append(response)
+
+        for response in responses:
+            response.send_message.assert_awaited_once()
+            assert "embed" in response.send_message.await_args.kwargs
 
     asyncio.run(scenario())

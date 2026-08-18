@@ -20,7 +20,6 @@ class SettingsCog(commands.Cog):
         assert self.bot.db is not None
         row = await self.bot.social_games.ensure_guild_settings(self.bot.db, guild_id)
         embed = discord.Embed(title=f"Настройки {BRAND_NAME}", color=discord.Color.blurple())
-        embed.add_field(name="NSFW RP", value=enabled_text(bool(row["nsfw_rp_enabled"])), inline=True)
         embed.add_field(
             name="NSFW-канал",
             value=f"<#{row['nsfw_channel_id']}>" if row["nsfw_channel_id"] else "не выбран",
@@ -30,7 +29,6 @@ class SettingsCog(commands.Cog):
         embed.add_field(name="Matchmaking", value=enabled_text(bool(row["matchmaking_enabled"])), inline=True)
         embed.add_field(name="NSFW story", value=enabled_text(bool(row["story_nsfw_enabled"])), inline=True)
         embed.add_field(name="Лог-канал", value=f"<#{row['log_channel_id']}>" if row["log_channel_id"] else "не задан", inline=True)
-        embed.add_field(name="18+ роль", value=f"<@&{row['adult_role_id']}>" if row["adult_role_id"] else "не задана", inline=True)
         return embed
 
     @app_commands.command(name="bot_settings", description="Показать настройки игровых и социальных модулей")
@@ -47,11 +45,6 @@ class SettingsCog(commands.Cog):
             return
         await self.bot.social_games.set_guild_flag(self.bot.db, interaction.guild.id, field, int(enabled))
         await interaction.response.send_message(f"{label}: {enabled_text(enabled)}.", ephemeral=True)
-
-    @app_commands.command(name="set_nsfw_rp", description="Включить или выключить NSFW RP на сервере")
-    @app_commands.default_permissions(administrator=True)
-    async def set_nsfw_rp(self, interaction: discord.Interaction, enabled: bool) -> None:
-        await self._set_bool(interaction, "nsfw_rp_enabled", enabled, "NSFW RP")
 
     @app_commands.command(name="set_nsfw_channel", description="Выбрать единственный канал для NSFW-команд")
     @app_commands.default_permissions(administrator=True)
@@ -110,19 +103,6 @@ class SettingsCog(commands.Cog):
             return
         await self.bot.social_games.set_guild_flag(self.bot.db, interaction.guild.id, "log_channel_id", channel.id)
         await interaction.response.send_message(f"Лог-канал установлен: {channel.mention}.", ephemeral=True)
-
-    @app_commands.command(name="set_adult_role", description="Задать обязательную роль для NSFW RP")
-    @app_commands.default_permissions(administrator=True)
-    async def set_adult_role(self, interaction: discord.Interaction, role: discord.Role | None = None) -> None:
-        if interaction.guild is None or self.bot.db is None:
-            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
-            return
-        await self.bot.social_games.set_guild_flag(self.bot.db, interaction.guild.id, "adult_role_id", role.id if role else 0)
-        await interaction.response.send_message(
-            f"18+ роль: {role.mention if role else 'отключена'}.", ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
-        )
-
-
 
 async def setup(bot: MovieBot) -> None:
     await bot.add_cog(SettingsCog(bot))
