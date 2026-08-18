@@ -26,12 +26,21 @@ class SocialGameService:
                 guild_id INTEGER PRIMARY KEY,
                 nsfw_rp_enabled INTEGER NOT NULL DEFAULT 0,
                 nsfw_channel_id INTEGER NOT NULL DEFAULT 0,
+                nsfw_import_channel_id INTEGER NOT NULL DEFAULT 0,
                 profile_analytics_enabled INTEGER NOT NULL DEFAULT 1,
                 matchmaking_enabled INTEGER NOT NULL DEFAULT 1,
                 story_nsfw_enabled INTEGER NOT NULL DEFAULT 0,
                 log_channel_id INTEGER NOT NULL DEFAULT 0,
                 adult_role_id INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS nsfw_import_deliveries (
+                guild_id INTEGER NOT NULL,
+                source_message_id INTEGER NOT NULL,
+                destination_message_id INTEGER NOT NULL DEFAULT 0,
+                imported_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, source_message_id)
             );
 
             CREATE TABLE IF NOT EXISTS rp_consent_settings (
@@ -235,6 +244,10 @@ class SocialGameService:
             await db.execute(
                 "ALTER TABLE guild_settings ADD COLUMN nsfw_channel_id INTEGER NOT NULL DEFAULT 0"
             )
+        if "nsfw_import_channel_id" not in columns:
+            await db.execute(
+                "ALTER TABLE guild_settings ADD COLUMN nsfw_import_channel_id INTEGER NOT NULL DEFAULT 0"
+            )
 
     async def _migrate_pet_battles(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(pets)")
@@ -398,6 +411,91 @@ class SocialGameService:
             WHERE guild_id = ?
             """,
             (channel_id, channel_id, utcnow_iso(), guild_id),
+        )
+        await db.commit()
+
+    async def set_nsfw_import_channel(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+        channel_id: int,
+    ) -> None:
+        await self.ensure_guild_settings(db, guild_id)
+        await db.execute(
+            "UPDATE guild_settings SET nsfw_import_channel_id = ?, updated_at = ? WHERE guild_id = ?",
+            (channel_id, utcnow_iso(), guild_id),
+        )
+        await db.commit()
+
+    async def get_nsfw_import_settings(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+    ) -> aiosqlite.Row | None:
+        cursor = await db.execute(
+            "SELECT nsfw_channel_id, nsfw_import_channel_id FROM guild_settings WHERE guild_id = ?",
+            (guild_id,),
+        )
+        return await cursor.fetchone()
+
+    async def was_nsfw_imported(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+        source_message_id: int,
+    ) -> bool:
+        cursor = await db.execute(
+            "SELECT 1 FROM nsfw_import_deliveries WHERE guild_id = ? AND source_message_id = ?",
+            (guild_id, source_message_id),
+        )
+        return await cursor.fetchone() is not None
+
+    async def claim_nsfw_import(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+        source_message_id: int,
+    ) -> bool:
+        cursor = await db.execute(
+            """
+            INSERT OR IGNORE INTO nsfw_import_deliveries
+                (guild_id, source_message_id, destination_message_id, imported_at)
+            VALUES (?, ?, 0, ?)
+            """,
+            (guild_id, source_message_id, utcnow_iso()),
+        )
+        await db.commit()
+        return cursor.rowcount == 1
+
+    async def record_nsfw_import_delivery(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+        source_message_id: int,
+        destination_message_id: int,
+    ) -> None:
+        await db.execute(
+            """
+            UPDATE nsfw_import_deliveries
+            SET destination_message_id = ?, imported_at = ?
+            WHERE guild_id = ? AND source_message_id = ?
+            """,
+            (destination_message_id, utcnow_iso(), guild_id, source_message_id),
+        )
+        await db.commit()
+
+    async def release_nsfw_import_claim(
+        self,
+        db: aiosqlite.Connection,
+        guild_id: int,
+        source_message_id: int,
+    ) -> None:
+        await db.execute(
+            """
+            DELETE FROM nsfw_import_deliveries
+            WHERE guild_id = ? AND source_message_id = ? AND destination_message_id = 0
+            """,
+            (guild_id, source_message_id),
         )
         await db.commit()
 

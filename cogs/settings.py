@@ -25,6 +25,11 @@ class SettingsCog(commands.Cog):
             value=f"<#{row['nsfw_channel_id']}>" if row["nsfw_channel_id"] else "не выбран",
             inline=True,
         )
+        embed.add_field(
+            name="Канал импорта NSFW",
+            value=f"<#{row['nsfw_import_channel_id']}>" if row["nsfw_import_channel_id"] else "не выбран",
+            inline=True,
+        )
         embed.add_field(name="Аналитика профилей", value=enabled_text(bool(row["profile_analytics_enabled"])), inline=True)
         embed.add_field(name="Matchmaking", value=enabled_text(bool(row["matchmaking_enabled"])), inline=True)
         embed.add_field(name="NSFW story", value=enabled_text(bool(row["story_nsfw_enabled"])), inline=True)
@@ -74,6 +79,62 @@ class SettingsCog(commands.Cog):
             text = "Выбранный NSFW-канал сброшен. Работают обычные каналы Discord с отметкой 18+."
         else:
             text = f"NSFW-команды включены только в {channel.mention}."
+        await interaction.response.send_message(
+            text,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @app_commands.command(name="set_nsfw_import_channel", description="Выбрать 18+ канал, из которого бот публикует сообщения")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def set_nsfw_import_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        if interaction.guild is None or self.bot.db is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+
+        settings = await self.bot.social_games.ensure_guild_settings(
+            self.bot.db,
+            interaction.guild.id,
+        )
+        target_channel_id = int(settings["nsfw_channel_id"])
+
+        if channel is not None and not channel.is_nsfw():
+            await interaction.response.send_message(
+                "Сначала включите для импорт-канала ограничение 18+ в настройках Discord.",
+                ephemeral=True,
+            )
+            return
+        if channel is not None and target_channel_id <= 0:
+            await interaction.response.send_message(
+                "Сначала выберите канал назначения через /set_nsfw_channel.",
+                ephemeral=True,
+            )
+            return
+        if channel is not None and channel.id == target_channel_id:
+            await interaction.response.send_message(
+                "Канал импорта и канал назначения должны быть разными, чтобы не создать цикл.",
+                ephemeral=True,
+            )
+            return
+
+        channel_id = channel.id if channel is not None else 0
+        await self.bot.social_games.set_nsfw_import_channel(
+            self.bot.db,
+            interaction.guild.id,
+            channel_id,
+        )
+        if channel is None:
+            text = "Автопубликация из импорт-канала выключена."
+        else:
+            text = (
+                f"Сообщения из {channel.mention} будут публиковаться ботом в "
+                f"<#{target_channel_id}>. Оба канала должны оставаться с ограничением 18+."
+            )
         await interaction.response.send_message(
             text,
             ephemeral=True,
