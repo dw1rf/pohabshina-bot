@@ -1,0 +1,102 @@
+VULGARITIES BOT PROPRIETARY LICENSE
+Version 1.0, 18 August 2026
+
+Copyright (c) 2026 dwarf (GitHub: dw1rf).
+All rights reserved.
+
+1. OWNERSHIP
+
+The software, source code, object code, documentation, original assets,
+configuration, database schemas, and other materials in this repository
+(collectively, the "Software") are proprietary works owned by the copyright
+holder identified above, except for third-party components and materials that
+are governed by their respective licenses.
+
+The Software is source-available for inspection only. It is not open-source or
+free software. No rights are granted by implication, estoppel, publication, or
+otherwise.
+
+2. NO LICENSE GRANT
+
+Unless the copyright holder gives prior express written permission in a
+separate agreement, you may not, in whole or in part:
+
+a. use, run, execute, deploy, host, or operate the Software;
+b. copy, reproduce, download, archive, or store the Software except for
+   temporary copies strictly necessary to view this repository through the
+   hosting service;
+c. modify, adapt, translate, reverse engineer, decompile, disassemble, or create
+   derivative works based on the Software;
+d. publish, distribute, transmit, sublicense, lease, rent, sell, resell, assign,
+   share, or otherwise make the Software available to any third party;
+e. incorporate the Software or any substantial portion of it into another bot,
+   application, service, dataset, product, or commercial offering;
+f. remove, conceal, or alter any copyright, attribution, ownership, or license
+   notice;
+g. represent the Software, its design, or its functionality as your own work;
+h. use the Software to train, fine-tune, evaluate, or supply data to an
+   artificial intelligence or machine-learning system, except where such a
+   restriction is unenforceable or superseded by mandatory terms accepted by
+   the copyright holder.
+
+3. GITHUB PLATFORM RIGHTS
+
+When this repository is public on GitHub, GitHub's Terms of Service may grant
+GitHub and its users limited rights required to view, display, and fork the
+repository through GitHub's functionality. This License does not revoke rights
+that the copyright holder has separately granted through those mandatory
+platform terms.
+
+Those platform rights do not provide any additional permission to run, deploy,
+modify, redistribute, sell, relicense, or use the Software outside the limited
+scope expressly provided by GitHub's Terms of Service.
+
+4. WRITTEN PERMISSION
+
+Any permitted use requires a separate written agreement that clearly identifies
+the recipient, the allowed purpose, the scope of use, and the duration. Silence,
+failure to enforce, repository access, an issue response, or acceptance of a
+pull request does not constitute permission.
+
+Permission requests may be submitted through the copyright holder's GitHub
+profile: https://github.com/dw1rf
+
+5. CONTRIBUTIONS
+
+By intentionally submitting a contribution to this repository, you represent
+that you have the right to submit it and grant the copyright holder a perpetual,
+irrevocable, worldwide, royalty-free, transferable, and sublicensable license
+to use, reproduce, modify, distribute, publicly display, publicly perform,
+relicense, and otherwise exploit that contribution as part of or in connection
+with the Software. No contribution grants the contributor any ownership of or
+license to the existing Software.
+
+6. THIRD-PARTY MATERIALS
+
+Third-party libraries, APIs, fonts, images, audio, video, and other materials
+remain subject to their own copyright notices and license terms. This License
+does not claim ownership of third-party materials and does not limit rights
+granted directly by their respective owners.
+
+7. TERMINATION AND ENFORCEMENT
+
+Any permission granted in a separate agreement terminates automatically upon a
+material breach unless that agreement states otherwise. Unauthorized use may
+subject the responsible party to all remedies available to the copyright holder
+under applicable law.
+
+8. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR
+A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT
+PERMITTED BY LAW, THE COPYRIGHT HOLDER IS NOT LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY ARISING FROM OR RELATED TO THE SOFTWARE OR ITS USE.
+
+9. SEVERABILITY
+
+If any provision of this License is found unenforceable, that provision shall be
+enforced to the maximum extent permitted, and the remaining provisions shall
+remain in effect.
+
+END OF TERMS
