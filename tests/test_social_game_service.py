@@ -73,6 +73,38 @@ class SocialGameServiceTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_nsfw_channel_migration_and_selection_persist(self) -> None:
+        async def scenario() -> None:
+            db = await aiosqlite.connect(":memory:")
+            db.row_factory = aiosqlite.Row
+            await db.executescript(
+                """
+                CREATE TABLE guild_settings (
+                    guild_id INTEGER PRIMARY KEY,
+                    nsfw_rp_enabled INTEGER NOT NULL DEFAULT 0,
+                    profile_analytics_enabled INTEGER NOT NULL DEFAULT 1,
+                    matchmaking_enabled INTEGER NOT NULL DEFAULT 1,
+                    story_nsfw_enabled INTEGER NOT NULL DEFAULT 0,
+                    log_channel_id INTEGER NOT NULL DEFAULT 0,
+                    adult_role_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO guild_settings (guild_id, updated_at)
+                VALUES (1, '2026-01-01T00:00:00+00:00');
+                """
+            )
+
+            service = SocialGameService()
+            await service.init_db(db)
+            await service.set_nsfw_channel(db, 1, 777)
+            settings = await service.ensure_guild_settings(db, 1)
+
+            self.assertEqual(settings["nsfw_channel_id"], 777)
+            self.assertEqual(settings["nsfw_rp_enabled"], 1)
+            await db.close()
+
+        asyncio.run(scenario())
+
     def test_config_contains_safe_defaults(self) -> None:
         self.assertIn("unban", SERVICE_INSTRUCTIONS)
         self.assertTrue(any(payload["nsfw"] for payload in RP_ACTIONS.values()))
