@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from utils.static_data import static_data_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +87,8 @@ def _clean_string_list(value: Any) -> list[str]:
 def load_engagement_content(path: str) -> EngagementContent:
     content = {key: list(values) for key, values in DEFAULT_ENGAGEMENT_CONTENT.items()}
     config_path = Path(path)
+    if not config_path.exists() and config_path.name == "engagement_content.json":
+        config_path = static_data_path("engagement_content.json")
 
     try:
         if config_path.exists():
