@@ -28,6 +28,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-COPY data/*.json /app/catalog_data/
+COPY catalog_data/*.json /app/catalog_data/
 
 CMD ["python", "-u", "bot.py"]
