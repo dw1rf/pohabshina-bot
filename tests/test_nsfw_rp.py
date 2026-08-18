@@ -93,6 +93,60 @@ def test_admin_cannot_select_channel_without_discord_age_gate() -> None:
     asyncio.run(scenario())
 
 
+def test_admin_can_select_separate_nsfw_import_channel() -> None:
+    async def scenario() -> None:
+        set_nsfw_import_channel = AsyncMock()
+        bot = SimpleNamespace(
+            db=object(),
+            social_games=SimpleNamespace(
+                ensure_guild_settings=AsyncMock(return_value={"nsfw_channel_id": 777}),
+                set_nsfw_import_channel=set_nsfw_import_channel,
+            ),
+        )
+        cog = object.__new__(SettingsCog)
+        cog.bot = bot
+        response = SimpleNamespace(send_message=AsyncMock())
+        interaction = SimpleNamespace(guild=SimpleNamespace(id=10), response=response)
+        channel = Mock(spec=discord.TextChannel)
+        channel.id = 888
+        channel.mention = "<#888>"
+        channel.is_nsfw.return_value = True
+
+        await SettingsCog.set_nsfw_import_channel.callback(cog, interaction, channel)
+
+        set_nsfw_import_channel.assert_awaited_once_with(bot.db, 10, 888)
+        assert "<#888>" in response.send_message.await_args.args[0]
+        assert "<#777>" in response.send_message.await_args.args[0]
+
+    asyncio.run(scenario())
+
+
+def test_admin_cannot_make_import_channel_the_destination() -> None:
+    async def scenario() -> None:
+        set_nsfw_import_channel = AsyncMock()
+        bot = SimpleNamespace(
+            db=object(),
+            social_games=SimpleNamespace(
+                ensure_guild_settings=AsyncMock(return_value={"nsfw_channel_id": 777}),
+                set_nsfw_import_channel=set_nsfw_import_channel,
+            ),
+        )
+        cog = object.__new__(SettingsCog)
+        cog.bot = bot
+        response = SimpleNamespace(send_message=AsyncMock())
+        interaction = SimpleNamespace(guild=SimpleNamespace(id=10), response=response)
+        channel = Mock(spec=discord.TextChannel)
+        channel.id = 777
+        channel.is_nsfw.return_value = True
+
+        await SettingsCog.set_nsfw_import_channel.callback(cog, interaction, channel)
+
+        set_nsfw_import_channel.assert_not_awaited()
+        assert "разными" in response.send_message.await_args.args[0]
+
+    asyncio.run(scenario())
+
+
 def test_rp_action_still_replies_when_optional_telemetry_fails() -> None:
     class SocialGames:
         async def ensure_guild_settings(self, _db: object, _guild_id: int) -> dict[str, int]:

@@ -100,6 +100,7 @@ class SocialGameServiceTests(unittest.TestCase):
             settings = await service.ensure_guild_settings(db, 1)
 
             self.assertEqual(settings["nsfw_channel_id"], 777)
+            self.assertEqual(settings["nsfw_import_channel_id"], 0)
             self.assertEqual(settings["nsfw_rp_enabled"], 1)
             await db.close()
 
