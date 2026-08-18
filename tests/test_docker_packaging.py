@@ -24,3 +24,7 @@ def test_docker_context_includes_required_data_manifests() -> None:
         "roleplay_sfw.json",
     }
     assert required_manifests <= {path.name for path in (PROJECT_ROOT / "data").glob("*.json")}
+
+    for dockerfile_name in ("Dockerfile", "Dockerfile.pterodactyl"):
+        dockerfile = (PROJECT_ROOT / dockerfile_name).read_text(encoding="utf-8")
+        assert "COPY data/*.json /app/catalog_data/" in dockerfile

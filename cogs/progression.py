@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 
 from bot_client import MovieBot
 from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, make_profile_file
+from utils.static_data import static_data_path
 
 
 logger = logging.getLogger(__name__)
@@ -67,9 +68,9 @@ class ProgressionCog(commands.Cog):
     async def _seed_catalogs(self) -> None:
         if self.bot.progression_db is None:
             return
-        achievement_data = json.loads((DATA_DIR / "achievements.json").read_text(encoding="utf-8"))
-        cosmetic_data = json.loads((DATA_DIR / "profile_cosmetics.json").read_text(encoding="utf-8"))
-        pet_data = json.loads((DATA_DIR / "pet_species.json").read_text(encoding="utf-8"))
+        achievement_data = json.loads(static_data_path("achievements.json").read_text(encoding="utf-8"))
+        cosmetic_data = json.loads(static_data_path("profile_cosmetics.json").read_text(encoding="utf-8"))
+        pet_data = json.loads(static_data_path("pet_species.json").read_text(encoding="utf-8"))
         first_species = next(iter(pet_data["species"].values()))
         thresholds = tuple(int(stage["xp"]) for stage in first_species["stages"][1:4])
         self.bot.progression.set_pet_stage_thresholds(thresholds)

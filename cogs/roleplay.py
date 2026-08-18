@@ -13,6 +13,7 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from cogs.social_game_content import RP_ACTIONS
+from utils.static_data import static_data_path
 
 logger = logging.getLogger(__name__)
 COMMAND_NAME_OVERRIDES = {
@@ -30,7 +31,7 @@ TEXT_REPLACEMENTS = (
     (f"{TEXT_MARKER}ованное", ""),
 )
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SFW_MANIFEST = PROJECT_ROOT / "data" / "roleplay_sfw.json"
+SFW_MANIFEST = static_data_path("roleplay_sfw.json")
 
 
 def _load_sfw_actions() -> dict[str, dict[str, str | bool]]:
