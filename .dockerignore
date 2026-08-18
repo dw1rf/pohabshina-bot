@@ -4,10 +4,8 @@
 __pycache__
 *.py[cod]
 .env
-# Runtime databases must stay out of the image, but the read-only JSON
-# manifests in data/ are required by the roleplay and progression cogs.
-data/*
-!data/*.json
+# Runtime databases and persistent state must stay out of the image.
+data
 *.sqlite3
 *.db
 cookies

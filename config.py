@@ -114,6 +114,6 @@ def load_settings() -> Settings:
         daily_message_channel_id=int(os.getenv("DAILY_MESSAGE_CHANNEL_ID", "0") or 0),
         birthday_channel_id=int(os.getenv("BIRTHDAY_CHANNEL_ID", "0") or 0),
         timezone=os.getenv("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow",
-        engagement_content_path=os.getenv("ENGAGEMENT_CONTENT_PATH", "data/engagement_content.json").strip()
-        or "data/engagement_content.json",
+        engagement_content_path=os.getenv("ENGAGEMENT_CONTENT_PATH", "catalog_data/engagement_content.json").strip()
+        or "catalog_data/engagement_content.json",
     )

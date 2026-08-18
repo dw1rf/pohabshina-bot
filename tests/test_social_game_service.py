@@ -114,7 +114,7 @@ class SocialGameServiceTests(unittest.TestCase):
         self.assertTrue(all("text" in payload and "label" in payload for payload in RP_ACTIONS.values()))
 
     def test_sfw_manifest_contains_more_than_sixty_actions(self) -> None:
-        manifest_path = Path(__file__).resolve().parents[1] / "data" / "roleplay_sfw.json"
+        manifest_path = Path(__file__).resolve().parents[1] / "catalog_data" / "roleplay_sfw.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         actions = manifest["actions"]
         self.assertGreaterEqual(len(actions), 60)

@@ -143,7 +143,7 @@ MOD_LOG_CHANNEL_ID=0
 DAILY_MESSAGE_CHANNEL_ID=0
 BIRTHDAY_CHANNEL_ID=0
 TIMEZONE=Europe/Moscow
-ENGAGEMENT_CONTENT_PATH=data/engagement_content.json
+ENGAGEMENT_CONTENT_PATH=catalog_data/engagement_content.json
 ```
 
 - `DAILY_MESSAGE_CHANNEL_ID` — канал для автоматических сообщений в 08:00 и 00:00 по Москве (`0` = выключено).
