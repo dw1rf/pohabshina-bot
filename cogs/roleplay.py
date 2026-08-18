@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import re
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import discord
@@ -68,7 +67,6 @@ class RoleplayCog(commands.Cog):
 
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
-        self._target_cooldowns: dict[tuple[int, int, str], datetime] = {}
         self._registered: set[tuple[int, str]] = set()
         self._synced_guilds: set[int] = set()
 
@@ -118,7 +116,6 @@ class RoleplayCog(commands.Cog):
 
     def _make_callback(self, action_key: str):
         @app_commands.describe(target="Участник RP-сцены", comment="Необязательный короткий комментарий")
-        @app_commands.checks.cooldown(1, 15)
         async def callback(interaction: discord.Interaction, target: discord.Member, comment: str | None = None) -> None:
             await self._handle_action(interaction, action_key, target, comment)
         return callback
@@ -144,19 +141,6 @@ class RoleplayCog(commands.Cog):
             if len(choices) == 25:
                 break
         return choices
-
-    @rp_group.command(name="consent", description="Настроить личное согласие на RP")
-    async def consent(self, interaction: discord.Interaction, nsfw_opt_in: bool) -> None:
-        if interaction.guild is None or self.bot.db is None:
-            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
-            return
-        await self.bot.social_games.set_rp_consent(
-            self.bot.db, interaction.guild.id, interaction.user.id, sfw=True, nsfw=nsfw_opt_in
-        )
-        status = "включено" if nsfw_opt_in else "выключено"
-        await interaction.response.send_message(
-            f"SFW RP доступно. Личное согласие на NSFW RP: {status}.", ephemeral=True
-        )
 
     @rp_group.command(name="stats", description="Показать счётчики RP-взаимодействий")
     async def stats(self, interaction: discord.Interaction, user: discord.Member | None = None) -> None:
@@ -192,12 +176,6 @@ class RoleplayCog(commands.Cog):
                 await interaction.response.send_message("RP-команды доступны только на сервере.", ephemeral=True)
                 return
             author = interaction.user
-            if target.bot:
-                await interaction.response.send_message("Нельзя использовать RP-команды на ботах.", ephemeral=True)
-                return
-            if target.id == author.id:
-                await interaction.response.send_message("Эта RP-команда требует второго участника.", ephemeral=True)
-                return
 
             nsfw = bool(payload["nsfw"])
             if nsfw:
@@ -205,9 +183,6 @@ class RoleplayCog(commands.Cog):
                     await interaction.response.send_message("NSFW RP временно недоступно.", ephemeral=True)
                     return
                 settings = await self.bot.social_games.ensure_guild_settings(self.bot.db, interaction.guild.id)
-                if not bool(settings["nsfw_rp_enabled"]):
-                    await interaction.response.send_message("NSFW RP выключено администрацией сервера.", ephemeral=True)
-                    return
                 nsfw_channel_id = int(settings["nsfw_channel_id"] or 0)
                 if not _is_nsfw_channel_allowed(interaction.channel, nsfw_channel_id):
                     if nsfw_channel_id:
@@ -219,24 +194,6 @@ class RoleplayCog(commands.Cog):
                         )
                     await interaction.response.send_message(text, ephemeral=True)
                     return
-                author_ok = await self.bot.social_games.has_rp_consent(self.bot.db, interaction.guild.id, author.id, nsfw=True)
-                target_ok = await self.bot.social_games.has_rp_consent(self.bot.db, interaction.guild.id, target.id, nsfw=True)
-                if not author_ok or not target_ok:
-                    await interaction.response.send_message("Оба участника должны включить личное согласие через `/rp consent`.", ephemeral=True)
-                    return
-                adult_role_id = int(settings["adult_role_id"] or 0)
-                if adult_role_id and (author.get_role(adult_role_id) is None or target.get_role(adult_role_id) is None):
-                    await interaction.response.send_message("У обоих участников должна быть настроенная 18+ роль.", ephemeral=True)
-                    return
-
-            cd_key = (interaction.guild.id, target.id, action_key)
-            now = datetime.now(UTC)
-            if cd_key in self._target_cooldowns and self._target_cooldowns[cd_key] > now:
-                left = int((self._target_cooldowns[cd_key] - now).total_seconds())
-                await interaction.response.send_message(f"Не спамьте одного участника. Подождите {left} сек.", ephemeral=True)
-                return
-            self._target_cooldowns[cd_key] = now + timedelta(seconds=60)
-
             action_text = str(payload["text"])
             for old_text, new_text in TEXT_REPLACEMENTS:
                 action_text = action_text.replace(old_text, new_text)
