@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.message_commands import is_reputation_command
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,8 @@ class PingGuardCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.guild is None or message.author.bot or self.bot.db is None:
+            return
+        if is_reputation_command(message.content):
             return
         await self.update_last_seen(message.guild.id, message.author.id)
         targets = [member for member in message.mentions if not member.bot and member.id != message.author.id]
