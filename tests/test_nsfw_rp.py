@@ -159,6 +159,53 @@ def test_rp_action_still_replies_when_optional_telemetry_fails() -> None:
     asyncio.run(scenario())
 
 
+def test_rp_progression_uses_ascii_idempotency_key_for_russian_action() -> None:
+    class SocialGames:
+        async def ensure_guild_settings(self, _db: object, _guild_id: int) -> dict[str, int]:
+            return {"nsfw_channel_id": 777}
+
+        async def increment_rp_action(self, *_args: object) -> int:
+            return 1
+
+    async def scenario() -> None:
+        record_event = AsyncMock()
+        bot = SimpleNamespace(
+            db=object(),
+            progression_db=object(),
+            social_games=SocialGames(),
+            progression=SimpleNamespace(record_event=record_event),
+        )
+        cog = object.__new__(RoleplayCog)
+        cog.bot = bot
+        author = Mock(spec=discord.Member)
+        author.id = 1
+        author.mention = "<@1>"
+        target = Mock(spec=discord.Member)
+        target.id = 2
+        target.mention = "<@2>"
+        response = SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False)
+        interaction = SimpleNamespace(
+            id=1003,
+            guild=SimpleNamespace(id=10),
+            user=author,
+            channel=SimpleNamespace(id=777, is_nsfw=lambda: True),
+            response=response,
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+
+        await cog._execute_action(
+            interaction,
+            "кончить_на_лицо",
+            target,
+            None,
+            {"label": "test", "text": "test action", "nsfw": True},
+        )
+
+        assert record_event.await_args.args[5] == "rp:1003"
+
+    asyncio.run(scenario())
+
+
 def test_nsfw_action_allows_bot_self_target_without_consent_or_role() -> None:
     class SocialGames:
         async def ensure_guild_settings(self, _db: object, _guild_id: int) -> dict[str, int]:

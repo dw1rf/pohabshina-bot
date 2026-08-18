@@ -232,7 +232,7 @@ class RoleplayCog(commands.Cog):
                                 author.id,
                                 "rp_action",
                                 1,
-                                f"rp:{interaction.id}:{action_key}",
+                                f"rp:{interaction.id}",
                                 metadata={"action": action_key},
                             )
                 except Exception:
