@@ -18,6 +18,27 @@ REP_COMMANDS: dict[str, int] = {
     "-rep": -1,
 }
 
+DISCORD_NICKNAME_MAX_LENGTH = 32
+
+
+def format_reputation_nickname(
+    current_name: str,
+    *,
+    previous_total: int,
+    new_total: int,
+) -> str | None:
+    """Build a signed reputation prefix while preserving the member's name."""
+    previous_prefix = f"{previous_total:+d} "
+    base_name = (
+        current_name[len(previous_prefix) :]
+        if current_name.startswith(previous_prefix)
+        else current_name
+    )
+    nickname = f"{new_total:+d} {base_name}"
+    if len(nickname) > DISCORD_NICKNAME_MAX_LENGTH:
+        return None
+    return nickname
+
 
 class ReputationCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
@@ -107,10 +128,52 @@ class ReputationCog(commands.Cog):
                 receiver.id,
             )
             total_rep = positive_rep - negative_rep
+            if isinstance(receiver, discord.Member):
+                await self._sync_member_reputation_nickname(
+                    receiver,
+                    previous_total=total_rep - value,
+                    new_total=total_rep,
+                )
             await self._send_reputation_embed(message, receiver, value, total_rep)
         except Exception:
             logger.exception("Failed to process reputation message %s", message.id)
             await message.channel.send("Произошла ошибка при изменении репутации. Попробуйте позже.")
+
+    async def _sync_member_reputation_nickname(
+        self,
+        member: discord.Member,
+        *,
+        previous_total: int,
+        new_total: int,
+    ) -> bool:
+        current_name = member.nick or member.display_name
+        nickname = format_reputation_nickname(
+            current_name,
+            previous_total=previous_total,
+            new_total=new_total,
+        )
+        if nickname is None:
+            logger.warning(
+                "Reputation nickname skipped because it would exceed Discord's limit: guild=%s user=%s",
+                member.guild.id,
+                member.id,
+            )
+            return False
+
+        try:
+            await member.edit(
+                nick=nickname,
+                reason="Обновление репутации участника",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            logger.warning(
+                "Failed to update reputation nickname: guild=%s user=%s",
+                member.guild.id,
+                member.id,
+                exc_info=True,
+            )
+            return False
+        return True
 
     async def _send_reputation_embed(
         self,
