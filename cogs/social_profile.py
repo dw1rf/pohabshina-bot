@@ -14,6 +14,7 @@ from discord.ext import commands
 from bot_client import MovieBot
 from services.social_game_service import utcnow_iso
 from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
+from utils.message_commands import is_reputation_command
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,8 @@ class SocialProfileCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.guild is None or message.author.bot or self.bot.db is None:
+            return
+        if is_reputation_command(message.content):
             return
         automod = self.bot.get_cog("AutomodCog")
         if automod is not None and not await automod.allows_progress(message):

@@ -2,6 +2,8 @@ from __future__ import annotations
 import random
 import re
 
+from utils.message_commands import is_reputation_command
+
 MAX_DISCORD_RESPONSE_LENGTH = 1800
 TRUNCATION_NOTICE = "\n\n[Ответ сокращён, потому что Discord — хуёвый пидор с лимитами.]"
 
@@ -180,7 +182,7 @@ class AIPersonaService:
 
     def is_command_like(self, content: str) -> bool:
         stripped = str(content or "").lstrip()
-        return stripped.startswith(("/", "!", ".", "?"))
+        return stripped.startswith(("/", "!", ".", "?")) or is_reputation_command(stripped)
 
     def _trim_discord_response(self, text: str) -> str:
         cleaned = str(text or "").strip()

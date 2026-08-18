@@ -8,15 +8,11 @@ import discord
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.message_commands import REPUTATION_COMMANDS, reputation_change
 
 logger = logging.getLogger(__name__)
 
-REP_COMMANDS: dict[str, int] = {
-    "+реп": 1,
-    "+rep": 1,
-    "-реп": -1,
-    "-rep": -1,
-}
+REP_COMMANDS = REPUTATION_COMMANDS
 
 DISCORD_NICKNAME_MAX_LENGTH = 32
 
@@ -50,8 +46,7 @@ class ReputationCog(commands.Cog):
         if message.guild is None or message.author.bot:
             return
 
-        normalized_content = (message.content or "").strip().lower()
-        value = REP_COMMANDS.get(normalized_content)
+        value = reputation_change(message.content)
         if value is not None:
             await self._handle_reputation_message(message, value)
             return

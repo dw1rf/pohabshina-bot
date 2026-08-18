@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
+logger = logging.getLogger(__name__)
+
 
 class ReputationService:
+    def __init__(self, *, lock_retry_delays: tuple[float, ...] = (0.1, 0.25, 0.5)) -> None:
+        self._lock_retry_delays = lock_retry_delays
+
     async def init_rep_db(self, db: aiosqlite.Connection) -> None:
         await db.executescript(
             """
@@ -73,7 +80,8 @@ class ReputationService:
         target_message_id: int | None = None,
     ) -> None:
         now_ts = datetime.now(UTC).isoformat()
-        await db.execute(
+        await self._execute_write_with_lock_retry(
+            db,
             """
             INSERT INTO reputation_events (
                 guild_id,
@@ -115,6 +123,29 @@ class ReputationService:
             """
         await db.execute(update_sql, (guild_id, receiver_user_id, now_ts))
         await db.commit()
+
+    async def _execute_write_with_lock_retry(
+        self,
+        db: aiosqlite.Connection,
+        sql: str,
+        parameters: tuple[object, ...],
+    ) -> None:
+        for attempt in range(len(self._lock_retry_delays) + 1):
+            try:
+                await db.execute(sql, parameters)
+                return
+            except aiosqlite.OperationalError as exc:
+                is_locked = "database is locked" in str(exc).lower()
+                if not is_locked or attempt >= len(self._lock_retry_delays):
+                    raise
+                delay = self._lock_retry_delays[attempt]
+                logger.warning(
+                    "SQLite busy while writing reputation; retrying in %.2fs (attempt %s/%s)",
+                    delay,
+                    attempt + 1,
+                    len(self._lock_retry_delays),
+                )
+                await asyncio.sleep(delay)
 
     async def get_user_rep(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> tuple[int, int]:
         cursor = await db.execute(

@@ -10,6 +10,7 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from utils.helpers import required_messages_for_level
+from utils.message_commands import is_reputation_command
 from utils.leaderboard_image import (
     LeaderboardImageRow,
     make_leaderboard_file,
@@ -54,6 +55,8 @@ class LevelsCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None or not self.bot.db:
+            return
+        if is_reputation_command(message.content):
             return
         automod = self.bot.get_cog("AutomodCog")
         if automod is not None and not await automod.allows_progress(message):
