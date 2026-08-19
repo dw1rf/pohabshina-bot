@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import aiosqlite
 
+from utils.sqlite_writes import sqlite_write_lock
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,9 +82,7 @@ class ReputationService:
         target_message_id: int | None = None,
     ) -> None:
         now_ts = datetime.now(UTC).isoformat()
-        await self._execute_write_with_lock_retry(
-            db,
-            """
+        event_sql = """
             INSERT INTO reputation_events (
                 guild_id,
                 giver_user_id,
@@ -94,17 +94,16 @@ class ReputationService:
                 target_message_id
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                guild_id,
-                giver_user_id,
-                receiver_user_id,
-                channel_id,
-                message_id,
-                rep_type,
-                now_ts,
-                target_message_id,
-            ),
+            """
+        event_parameters = (
+            guild_id,
+            giver_user_id,
+            receiver_user_id,
+            channel_id,
+            message_id,
+            rep_type,
+            now_ts,
+            target_message_id,
         )
 
         if rep_type == "plus":
@@ -121,31 +120,29 @@ class ReputationService:
                 ON CONFLICT(guild_id, user_id)
                 DO UPDATE SET negative_rep = negative_rep + 1, updated_at = excluded.updated_at
             """
-        await db.execute(update_sql, (guild_id, receiver_user_id, now_ts))
-        await db.commit()
-
-    async def _execute_write_with_lock_retry(
-        self,
-        db: aiosqlite.Connection,
-        sql: str,
-        parameters: tuple[object, ...],
-    ) -> None:
-        for attempt in range(len(self._lock_retry_delays) + 1):
-            try:
-                await db.execute(sql, parameters)
-                return
-            except aiosqlite.OperationalError as exc:
-                is_locked = "database is locked" in str(exc).lower()
-                if not is_locked or attempt >= len(self._lock_retry_delays):
+        async with sqlite_write_lock(db):
+            for attempt in range(len(self._lock_retry_delays) + 1):
+                try:
+                    await db.execute(event_sql, event_parameters)
+                    await db.execute(update_sql, (guild_id, receiver_user_id, now_ts))
+                    await db.commit()
+                    return
+                except aiosqlite.OperationalError as exc:
+                    await db.rollback()
+                    is_locked = "database is locked" in str(exc).lower()
+                    if not is_locked or attempt >= len(self._lock_retry_delays):
+                        raise
+                    delay = self._lock_retry_delays[attempt]
+                    logger.warning(
+                        "SQLite busy while writing reputation transaction; retrying in %.2fs (attempt %s/%s)",
+                        delay,
+                        attempt + 1,
+                        len(self._lock_retry_delays),
+                    )
+                    await asyncio.sleep(delay)
+                except BaseException:
+                    await db.rollback()
                     raise
-                delay = self._lock_retry_delays[attempt]
-                logger.warning(
-                    "SQLite busy while writing reputation; retrying in %.2fs (attempt %s/%s)",
-                    delay,
-                    attempt + 1,
-                    len(self._lock_retry_delays),
-                )
-                await asyncio.sleep(delay)
 
     async def get_user_rep(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> tuple[int, int]:
         cursor = await db.execute(

@@ -44,6 +44,8 @@ class MovieBot(commands.Bot):
         self.settings = settings
         self.session: aiohttp.ClientSession | None = None
         self.db: aiosqlite.Connection | None = None
+        self.reputation_db: aiosqlite.Connection | None = None
+        self.jail_db: aiosqlite.Connection | None = None
         # Each write-heavy domain gets its own SQLite connection.  Sharing one
         # aiosqlite connection between unrelated service locks lets one task
         # commit or collide with another task's transaction.
@@ -138,6 +140,11 @@ class MovieBot(commands.Bot):
         await self.reaction_roles.init_db(self.db)
         await self.support_tickets.init_db(self.db)
         await self.social_games.init_db(self.db)
+        # Critical moderation/reputation transactions must not share a
+        # connection with unrelated listeners that can commit mid-operation.
+        # A shorter busy timeout keeps retry budgets bounded for interactions.
+        self.reputation_db = await self._open_database_connection(busy_timeout_ms=1000)
+        self.jail_db = await self._open_database_connection(busy_timeout_ms=1000)
         self.economy_db = await self._open_database_connection()
         await self.economy.init_db(self.economy_db)
         self.progression_db = await self._open_database_connection()
@@ -165,13 +172,13 @@ class MovieBot(commands.Bot):
         if failed_cogs:
             logger.warning("Bot started with failed cogs: count=%s", len(failed_cogs))
 
-    async def _open_database_connection(self) -> aiosqlite.Connection:
+    async def _open_database_connection(self, *, busy_timeout_ms: int = 10000) -> aiosqlite.Connection:
         db = await aiosqlite.connect(self.settings.db_path)
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA foreign_keys=ON")
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
-        await db.execute("PRAGMA busy_timeout=10000")
+        await db.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
         return db
 
     def _prepare_database_path(self) -> None:
@@ -251,6 +258,8 @@ class MovieBot(commands.Bot):
             self.community_db,
             self.progression_db,
             self.economy_db,
+            self.jail_db,
+            self.reputation_db,
             self.db,
         )
         seen: set[int] = set()

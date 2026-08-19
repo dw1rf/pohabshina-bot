@@ -15,6 +15,7 @@ from bot_client import MovieBot
 from services.social_game_service import utcnow_iso
 from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
 from utils.message_commands import is_reputation_command
+from utils.sqlite_writes import sqlite_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -179,18 +180,21 @@ class SocialProfileCog(commands.Cog):
         automod = self.bot.get_cog("AutomodCog")
         if automod is not None and not await automod.allows_progress(message):
             return
-        try:
-            settings = await self.bot.social_games.ensure_guild_settings(self.bot.db, message.guild.id)
-            if not settings["profile_analytics_enabled"]:
-                return
-            privacy = await self.bot.social_games.get_privacy_settings(self.bot.db, message.guild.id, message.author.id)
-            if not privacy["analytics_enabled"]:
-                return
-            await self._aggregate_message(message, bool(privacy["store_message_samples"]))
-        except (aiosqlite.Error, discord.HTTPException):
-            logger.exception("Failed to aggregate profile activity for guild=%s user=%s", message.guild.id, message.author.id)
-        except Exception:
-            logger.exception("Unexpected profile aggregation error for guild=%s user=%s", message.guild.id, message.author.id)
+        async with sqlite_write_lock(self.bot.db):
+            try:
+                settings = await self.bot.social_games.ensure_guild_settings(self.bot.db, message.guild.id)
+                if not settings["profile_analytics_enabled"]:
+                    return
+                privacy = await self.bot.social_games.get_privacy_settings(self.bot.db, message.guild.id, message.author.id)
+                if not privacy["analytics_enabled"]:
+                    return
+                await self._aggregate_message(message, bool(privacy["store_message_samples"]))
+            except (aiosqlite.Error, discord.HTTPException):
+                await self.bot.db.rollback()
+                logger.exception("Failed to aggregate profile activity for guild=%s user=%s", message.guild.id, message.author.id)
+            except Exception:
+                await self.bot.db.rollback()
+                logger.exception("Unexpected profile aggregation error for guild=%s user=%s", message.guild.id, message.author.id)
 
     async def _aggregate_message(self, message: discord.Message, store_sample: bool) -> None:
         assert self.bot.db is not None and message.guild is not None

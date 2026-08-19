@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 from collections import deque
@@ -40,6 +41,7 @@ class ReputationCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self.last_messages_by_channel: dict[int, deque[discord.Message]] = {}
+        self._giver_locks: dict[tuple[int, int], asyncio.Lock] = {}
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
@@ -76,7 +78,8 @@ class ReputationCog(commands.Cog):
         return not prefixes or not content.startswith(prefixes)
 
     async def _handle_reputation_message(self, message: discord.Message, value: int) -> None:
-        if not self.bot.db:
+        db = getattr(self.bot, "reputation_db", None) or self.bot.db
+        if db is None:
             logger.warning("Reputation command ignored because database is not initialized")
             return
 
@@ -97,28 +100,37 @@ class ReputationCog(commands.Cog):
                 await message.channel.send("Ботам репутацию менять нельзя.")
                 return
 
-            can_give = await self.bot.reputation.can_give_rep(
-                self.bot.db,
-                message.guild.id,
-                message.author.id,
-            )
-            if not can_give:
-                await message.channel.send("Лимит репутации: 2 раза в 24 часа.")
-                return
+            locks = getattr(self, "_giver_locks", None)
+            if locks is None:
+                locks = self._giver_locks = {}
+            giver_key = (message.guild.id, message.author.id)
+            giver_lock = locks.setdefault(giver_key, asyncio.Lock())
+            # Keep per-giver locks for the cog lifetime. Removing a lock after
+            # release can race a queued waiter and let a third task create a
+            # second lock for the same giver.
+            async with giver_lock:
+                can_give = await self.bot.reputation.can_give_rep(
+                    db,
+                    message.guild.id,
+                    message.author.id,
+                )
+                if not can_give:
+                    await message.channel.send("Лимит репутации: 2 раза в 24 часа.")
+                    return
 
-            rep_type = "plus" if value > 0 else "minus"
-            await self.bot.reputation.add_rep_event(
-                self.bot.db,
-                guild_id=message.guild.id,
-                giver_user_id=message.author.id,
-                receiver_user_id=receiver.id,
-                channel_id=message.channel.id,
-                message_id=message.id,
-                rep_type=rep_type,
-                target_message_id=target_message.id,
-            )
+                rep_type = "plus" if value > 0 else "minus"
+                await self.bot.reputation.add_rep_event(
+                    db,
+                    guild_id=message.guild.id,
+                    giver_user_id=message.author.id,
+                    receiver_user_id=receiver.id,
+                    channel_id=message.channel.id,
+                    message_id=message.id,
+                    rep_type=rep_type,
+                    target_message_id=target_message.id,
+                )
             positive_rep, negative_rep = await self.bot.reputation.get_user_rep(
-                self.bot.db,
+                db,
                 message.guild.id,
                 receiver.id,
             )

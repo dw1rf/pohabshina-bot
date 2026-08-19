@@ -6,6 +6,7 @@ import aiosqlite
 
 from config import Settings
 from utils.helpers import calculate_level, now_iso
+from utils.sqlite_writes import sqlite_write_lock
 
 
 class LevelService:
@@ -97,6 +98,16 @@ class LevelService:
         await db.commit()
 
     async def update_level_progress(
+        self, db: aiosqlite.Connection, guild_id: int, user_id: int, message_ts: datetime
+    ) -> tuple[int, int, bool, bool]:
+        async with sqlite_write_lock(db):
+            try:
+                return await self._update_level_progress(db, guild_id, user_id, message_ts)
+            except BaseException:
+                await db.rollback()
+                raise
+
+    async def _update_level_progress(
         self, db: aiosqlite.Connection, guild_id: int, user_id: int, message_ts: datetime
     ) -> tuple[int, int, bool, bool]:
         cursor = await db.execute(

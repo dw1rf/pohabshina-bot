@@ -8,6 +8,7 @@ from discord.ext import commands
 
 from bot_client import MovieBot
 from utils.message_commands import is_reputation_command
+from utils.sqlite_writes import sqlite_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -142,16 +143,21 @@ class PingGuardCog(commands.Cog):
     async def update_last_seen(self, guild_id: int, user_id: int) -> None:
         if self.bot.db is None:
             return
-        await self.bot.db.execute(
-            """
-            INSERT INTO user_last_seen (guild_id, user_id, last_message_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                last_message_at = excluded.last_message_at
-            """,
-            (guild_id, user_id, iso(utcnow())),
-        )
-        await self.bot.db.commit()
+        async with sqlite_write_lock(self.bot.db):
+            try:
+                await self.bot.db.execute(
+                    """
+                    INSERT INTO user_last_seen (guild_id, user_id, last_message_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                        last_message_at = excluded.last_message_at
+                    """,
+                    (guild_id, user_id, iso(utcnow())),
+                )
+                await self.bot.db.commit()
+            except BaseException:
+                await self.bot.db.rollback()
+                raise
 
     async def target_recently_active(self, guild_id: int, user_id: int) -> bool:
         if self.bot.db is None:

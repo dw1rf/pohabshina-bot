@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import UTC, datetime, timedelta
 
+import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -22,6 +23,10 @@ JAIL_SLOWMODE_SECONDS = 30
 JAIL_PERMISSION_SYNC_CONCURRENCY = 4
 JAIL_APPEAL_BUTTON_ID = "moderation:jail:appeal"
 JAIL_TIME_BUTTON_ID = "moderation:jail:remaining"
+
+
+class JailPermissionSyncError(RuntimeError):
+    pass
 
 
 def _utcnow() -> datetime:
@@ -94,7 +99,11 @@ class ModerationCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self._jail_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
+        self._jail_operation_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self.bot.add_view(JailView(self))
+
+    def _jail_database(self) -> aiosqlite.Connection | None:
+        return getattr(self.bot, "jail_db", None) or self.bot.db
 
     async def cog_load(self) -> None:
         self.bot.loop.create_task(self._resume_active_jails())
@@ -123,6 +132,34 @@ class ModerationCog(commands.Cog):
         except Exception:
             logger.exception("Unexpected mod log failure: guild=%s action=%s", guild.id, action)
             return False
+
+    async def _rollback_failed_jail_database_save(
+        self,
+        user: discord.Member,
+        role: discord.Role,
+        channel: discord.TextChannel,
+    ) -> bool:
+        reason = "Rollback failed jail database save"
+        cleaned_up = True
+        try:
+            await user.remove_roles(role, reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            cleaned_up = False
+            logger.exception(
+                "Failed to remove jail role after database save failure: guild=%s user=%s",
+                user.guild.id,
+                user.id,
+            )
+        try:
+            await channel.delete(reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            cleaned_up = False
+            logger.exception(
+                "Failed to delete jail channel after database save failure: guild=%s channel=%s",
+                channel.guild.id,
+                channel.id,
+            )
+        return cleaned_up
 
     @staticmethod
     def _can_use_jail(member: discord.Member | discord.User) -> bool:
@@ -223,6 +260,7 @@ class ModerationCog(commands.Cog):
             channels_to_update.append((channel, overwrite))
 
         semaphore = asyncio.Semaphore(JAIL_PERMISSION_SYNC_CONCURRENCY)
+        failed_channel_ids: list[int] = []
 
         async def apply_overwrite(
             channel: discord.abc.GuildChannel,
@@ -236,6 +274,7 @@ class ModerationCog(commands.Cog):
                         reason="Jail role channel lock",
                     )
             except (discord.Forbidden, discord.HTTPException) as exc:
+                failed_channel_ids.append(channel.id)
                 logger.warning(
                     "Failed to lock channel for jail role: guild=%s channel=%s error=%s",
                     guild.id,
@@ -246,6 +285,10 @@ class ModerationCog(commands.Cog):
         if channels_to_update:
             await asyncio.gather(
                 *(apply_overwrite(channel, overwrite) for channel, overwrite in channels_to_update)
+            )
+        if failed_channel_ids:
+            raise JailPermissionSyncError(
+                f"Could not lock {len(failed_channel_ids)} channels: {failed_channel_ids[:10]}"
             )
 
     async def _create_jail_channel(
@@ -353,26 +396,28 @@ class ModerationCog(commands.Cog):
 
     async def _resume_active_jails(self) -> None:
         await self.bot.wait_until_ready()
-        if self.bot.db is None:
+        db = self._jail_database()
+        if db is None:
             return
-        rows = await self.bot.jails.list_active(self.bot.db)
+        rows = await self.bot.jails.list_active(db)
         for record in rows:
             self._schedule_jail_release(record)
 
-    def _schedule_jail_release(self, record: JailRecord) -> None:
+    def _schedule_jail_release(self, record: JailRecord, *, retry_now: bool = False) -> None:
         key = (record.guild_id, record.user_id)
         old_task = self._jail_tasks.pop(key, None)
         if old_task is not None:
             old_task.cancel()
-        task = self.bot.loop.create_task(self._release_when_due(record))
+        task = self.bot.loop.create_task(self._release_when_due(record, retry_now=retry_now))
         self._jail_tasks[key] = task
 
-    async def _release_when_due(self, record: JailRecord) -> None:
+    async def _release_when_due(self, record: JailRecord, *, retry_now: bool = False) -> None:
         try:
-            delay = max(0.0, (_parse_iso(record.expires_at) - _utcnow()).total_seconds())
+            delay = 0.0 if retry_now else max(0.0, (_parse_iso(record.expires_at) - _utcnow()).total_seconds())
             if delay:
                 await asyncio.sleep(delay)
-            await self.release_jail(record, reason="Срок тюрьмы закончился.")
+            while not await self.release_jail(record, reason="Срок тюрьмы закончился."):
+                await asyncio.sleep(300)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -380,25 +425,36 @@ class ModerationCog(commands.Cog):
         finally:
             self._jail_tasks.pop((record.guild_id, record.user_id), None)
 
-    async def release_jail(self, record: JailRecord, *, reason: str) -> None:
-        if self.bot.db is None:
-            return
+    async def release_jail(self, record: JailRecord, *, reason: str) -> bool:
+        if self._jail_database() is None:
+            return False
         guild = self.bot.get_guild(record.guild_id)
         if guild is None:
-            return
+            return False
 
         member = guild.get_member(record.user_id)
+        role_release_failed = False
         if member is not None:
             role = guild.get_role(record.role_id)
             if role is not None and role in member.roles:
                 try:
                     await member.remove_roles(role, reason=reason)
                 except (discord.Forbidden, discord.HTTPException) as exc:
+                    role_release_failed = True
                     logger.warning("Failed to remove jail role: guild=%s user=%s error=%s", guild.id, member.id, exc)
             try:
                 await member.send(reason)
             except discord.HTTPException:
                 pass
+
+        if role_release_failed:
+            await self._safe_mod_log(
+                guild,
+                "unjail failed",
+                f"Не удалось снять jail-роль с <@{record.user_id}> ({record.user_id}); запись сохранена для повтора.",
+                discord.Color.red(),
+            )
+            return False
 
         channel = guild.get_channel(record.channel_id)
         if channel is None:
@@ -406,27 +462,59 @@ class ModerationCog(commands.Cog):
                 channel = await self.bot.fetch_channel(record.channel_id)
             except (discord.Forbidden, discord.NotFound, discord.HTTPException):
                 channel = None
+        channel_cleanup_failed = False
         if isinstance(channel, discord.TextChannel):
             try:
                 await channel.send(f"🔓 {reason}")
                 await channel.delete(reason=reason)
             except (discord.Forbidden, discord.HTTPException) as exc:
+                channel_cleanup_failed = True
                 logger.warning("Failed to close jail channel: guild=%s channel=%s error=%s", guild.id, record.channel_id, exc)
 
-        await self.bot.jails.remove(self.bot.db, record.guild_id, record.user_id)
+        if channel_cleanup_failed:
+            await self._safe_mod_log(
+                guild,
+                "unjail cleanup pending",
+                f"Роль снята, но jail-канал <#{record.channel_id}> не удалён; запись сохранена для повтора.",
+                discord.Color.orange(),
+            )
+            return False
+
+        db = self._jail_database()
+        if db is not None:
+            try:
+                await self.bot.jails.remove(db, record.guild_id, record.user_id)
+            except aiosqlite.Error:
+                logger.exception(
+                    "Failed to remove released jail record; keeping it for retry: guild=%s user=%s",
+                    record.guild_id,
+                    record.user_id,
+                )
+                await self._safe_mod_log(
+                    guild,
+                    "unjail cleanup pending",
+                    f"Роль снята, но запись БД для <@{record.user_id}> не удалена; бот повторит автоматически.",
+                    discord.Color.orange(),
+                )
+                return False
         await self._safe_mod_log(
             guild,
             "unjail",
             f"Пользователь: <@{record.user_id}> ({record.user_id})\nПричина: {reason}",
             discord.Color.green(),
         )
+        return True
 
     async def handle_jail_appeal(self, interaction: discord.Interaction, text: str) -> None:
         guild = interaction.guild
         if guild is None or self.bot.db is None:
             await self._safe_reply(interaction, "Апелляция доступна только на сервере.")
             return
-        record = await self.bot.jails.get_active_by_user(self.bot.db, guild.id, interaction.user.id)
+        db = self._jail_database()
+        if db is None:
+            await self._safe_reply(interaction, "База данных временно недоступна.")
+            return
+        record = await self.bot.jails.get_active_by_user(db, guild.id, interaction.user.id)
         if record is None:
             await self._safe_reply(interaction, "У вас нет активного срока в тюрьме.")
             return
@@ -471,7 +559,11 @@ class ModerationCog(commands.Cog):
         if guild is None or self.bot.db is None:
             await self._safe_reply(interaction, "Недоступно вне сервера.")
             return
-        record = await self.bot.jails.get_active_by_user(self.bot.db, guild.id, interaction.user.id)
+        db = self._jail_database()
+        if db is None:
+            await self._safe_reply(interaction, "База данных временно недоступна.")
+            return
+        record = await self.bot.jails.get_active_by_user(db, guild.id, interaction.user.id)
         if record is None:
             await self._safe_reply(interaction, "Активный срок не найден.")
             return
@@ -662,7 +754,34 @@ class ModerationCog(commands.Cog):
     @app_commands.default_permissions(moderate_members=True)
     async def jail(self, interaction: discord.Interaction, user: discord.Member, reason: str, duration: str) -> None:
         guild = self._guild(interaction)
-        if guild is None or self.bot.db is None:
+        if guild is None:
+            await self._safe_reply(interaction, "Команда доступна только на сервере.")
+            return
+        locks = getattr(self, "_jail_operation_locks", None)
+        if locks is None:
+            locks = self._jail_operation_locks = {}
+        key = (guild.id, user.id)
+        lock = locks.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            await self._safe_reply(interaction, "Операция /jail для этого пользователя уже выполняется.")
+            return
+        try:
+            async with lock:
+                await self._jail_impl(interaction, user, reason, duration)
+        finally:
+            if not lock.locked():
+                locks.pop(key, None)
+
+    async def _jail_impl(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member,
+        reason: str,
+        duration: str,
+    ) -> None:
+        guild = self._guild(interaction)
+        db = self._jail_database()
+        if guild is None or db is None:
             await self._safe_reply(interaction, "Команда доступна только на сервере.")
             return
         if not isinstance(interaction.user, discord.Member) or not self._can_use_jail(interaction.user):
@@ -679,13 +798,22 @@ class ModerationCog(commands.Cog):
             await self._safe_reply(interaction, validation_error)
             return
 
-        existing = await self.bot.jails.get_active_by_user(self.bot.db, guild.id, user.id)
+        # A busy shared SQLite connection must not make Discord time out the
+        # interaction before we can acknowledge the command.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            existing = await self.bot.jails.get_active_by_user(db, guild.id, user.id)
+        except aiosqlite.Error:
+            logger.exception("Failed to check active jail because SQLite is unavailable: guild=%s user=%s", guild.id, user.id)
+            await self._safe_reply(interaction, "База данных временно занята. Попробуйте /jail ещё раз через несколько секунд.")
+            return
         if existing is not None:
             await self._safe_reply(interaction, f"Пользователь уже в тюрьме: <#{existing.channel_id}>.")
             return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
+        role: discord.Role | None = None
+        channel: discord.TextChannel | None = None
         try:
             category = await self._get_or_create_jail_category(guild)
             role = await self._get_or_create_jail_role(guild)
@@ -694,27 +822,59 @@ class ModerationCog(commands.Cog):
             await user.add_roles(role, reason=f"Jail by {interaction.user}: {reason}")
             if user.voice and user.voice.channel:
                 await user.move_to(None, reason=f"Jail by {interaction.user}: {reason}")
+        except asyncio.CancelledError:
+            if role is not None and channel is not None:
+                await self._rollback_failed_jail_database_save(user, role, channel)
+            raise
+        except JailPermissionSyncError as exc:
+            logger.warning("Jail permission sync failed closed: guild=%s error=%s", guild.id, exc)
+            await self._safe_reply(
+                interaction,
+                "Тюрьма не применена: бот не смог закрыть все обычные каналы. Проверьте Manage Channels и порядок ролей.",
+            )
+            return
         except discord.Forbidden:
+            if role is not None and channel is not None:
+                await self._rollback_failed_jail_database_save(user, role, channel)
             await self._safe_reply(interaction, "Не удалось оформить тюрьму: боту не хватает прав или роль ниже нужной.")
             return
         except discord.HTTPException as exc:
             logger.warning("Failed to create jail: guild=%s user=%s error=%s", guild.id, user.id, exc)
+            if role is not None and channel is not None:
+                await self._rollback_failed_jail_database_save(user, role, channel)
             await self._safe_reply(interaction, "Discord API не принял создание тюрьмы. Проверьте права бота и попробуйте позже.")
             return
 
         started_at = _utcnow()
         expires_at = started_at + delta
-        await self.bot.jails.upsert(
-            self.bot.db,
-            guild_id=guild.id,
-            user_id=user.id,
-            channel_id=channel.id,
-            role_id=role.id,
-            reason=reason,
-            moderator_id=interaction.user.id,
-            started_at=started_at.isoformat(),
-            expires_at=expires_at.isoformat(),
-        )
+        try:
+            await self.bot.jails.upsert(
+                db,
+                guild_id=guild.id,
+                user_id=user.id,
+                channel_id=channel.id,
+                role_id=role.id,
+                reason=reason,
+                moderator_id=interaction.user.id,
+                started_at=started_at.isoformat(),
+                expires_at=expires_at.isoformat(),
+            )
+        except asyncio.CancelledError:
+            await self._rollback_failed_jail_database_save(user, role, channel)
+            raise
+        except aiosqlite.Error:
+            logger.exception("Failed to save active jail: guild=%s user=%s", guild.id, user.id)
+            cleaned_up = await self._rollback_failed_jail_database_save(user, role, channel)
+            cleanup_status = (
+                "Изменения Discord отменены"
+                if cleaned_up
+                else "Не все изменения Discord удалось отменить; администраторам отправлена ошибка в журнал"
+            )
+            await self._safe_reply(
+                interaction,
+                f"Не удалось сохранить тюрьму: база данных занята. {cleanup_status}, попробуйте ещё раз.",
+            )
+            return
         record = JailRecord(
             guild_id=guild.id,
             user_id=user.id,
@@ -753,13 +913,14 @@ class ModerationCog(commands.Cog):
     @app_commands.default_permissions(moderate_members=True)
     async def unjail(self, interaction: discord.Interaction, user: discord.Member, reason: str = "Досрочное освобождение") -> None:
         guild = self._guild(interaction)
-        if guild is None or self.bot.db is None:
+        db = self._jail_database()
+        if guild is None or db is None:
             await self._safe_reply(interaction, "Команда доступна только на сервере.")
             return
         if not isinstance(interaction.user, discord.Member) or not self._can_use_jail(interaction.user):
             await self._safe_reply(interaction, "У вас нет прав для команды /unjail.")
             return
-        record = await self.bot.jails.get_active_by_user(self.bot.db, guild.id, user.id)
+        record = await self.bot.jails.get_active_by_user(db, guild.id, user.id)
         if record is None:
             await self._safe_reply(interaction, "У пользователя нет активного срока в тюрьме.")
             return
@@ -767,8 +928,15 @@ class ModerationCog(commands.Cog):
         task = self._jail_tasks.pop((record.guild_id, record.user_id), None)
         if task is not None:
             task.cancel()
-        await self.release_jail(record, reason=reason)
-        await self._safe_reply(interaction, f"🔓 Пользователь {user.mention} освобождён.")
+        released = await self.release_jail(record, reason=reason)
+        if released:
+            await self._safe_reply(interaction, f"🔓 Пользователь {user.mention} освобождён.")
+        else:
+            self._schedule_jail_release(record, retry_now=True)
+            await self._safe_reply(
+                interaction,
+                "Не удалось снять jail-роль. Запись сохранена, бот повторит освобождение автоматически.",
+            )
 
     @app_commands.command(name="ban", description="Забанить пользователя")
     async def ban(self, interaction: discord.Interaction, user: discord.Member, reason: str) -> None:
