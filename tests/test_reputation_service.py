@@ -95,3 +95,112 @@ def test_reputation_retries_the_whole_transaction_without_partial_state() -> Non
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_existing_reputation_schema_is_migrated_with_event_metadata() -> None:
+    async def scenario() -> None:
+        db = await aiosqlite.connect(":memory:")
+        db.row_factory = aiosqlite.Row
+        service = ReputationService()
+        try:
+            await db.execute(
+                """
+                CREATE TABLE reputation_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    giver_user_id INTEGER NOT NULL,
+                    receiver_user_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    rep_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            await db.commit()
+
+            await service.init_rep_db(db)
+
+            columns = {
+                row["name"]
+                for row in await (await db.execute("PRAGMA table_info(reputation_events)")).fetchall()
+            }
+            assert {"target_message_id", "amount", "source"} <= columns
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_admin_adjustment_is_atomic_and_does_not_consume_user_limit() -> None:
+    async def scenario() -> None:
+        db = await aiosqlite.connect(":memory:")
+        db.row_factory = aiosqlite.Row
+        service = ReputationService(lock_retry_delays=(0,))
+        try:
+            await service.init_rep_db(db)
+
+            assert await service.adjust_reputation(
+                db,
+                guild_id=1,
+                actor_user_id=2,
+                receiver_user_id=3,
+                channel_id=4,
+                interaction_id=5,
+                delta=10,
+            ) == (0, 10)
+            assert await service.adjust_reputation(
+                db,
+                guild_id=1,
+                actor_user_id=2,
+                receiver_user_id=3,
+                channel_id=4,
+                interaction_id=6,
+                delta=-4,
+            ) == (10, 6)
+            assert await service.get_user_rep(db, 1, 3) == (10, 4)
+            assert await service.can_give_rep(db, 1, 2)
+
+            events = await (
+                await db.execute(
+                    "SELECT rep_type, amount, source FROM reputation_events ORDER BY id"
+                )
+            ).fetchall()
+            assert [tuple(row) for row in events] == [
+                ("plus", 10, "admin"),
+                ("minus", 4, "admin"),
+            ]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_admin_adjustment_retries_without_partial_event() -> None:
+    async def scenario() -> None:
+        db = await aiosqlite.connect(":memory:")
+        db.row_factory = aiosqlite.Row
+        service = ReputationService(lock_retry_delays=(0,))
+        try:
+            await service.init_rep_db(db)
+            flaky_db = FailOnceAfterEventInsert(db)
+
+            assert await service.adjust_reputation(
+                flaky_db,
+                guild_id=1,
+                actor_user_id=2,
+                receiver_user_id=3,
+                channel_id=4,
+                interaction_id=5,
+                delta=-7,
+            ) == (0, -7)
+
+            event_count = await (
+                await db.execute("SELECT COUNT(*) FROM reputation_events")
+            ).fetchone()
+            assert event_count[0] == 1
+            assert await service.get_user_rep(db, 1, 3) == (0, 7)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())

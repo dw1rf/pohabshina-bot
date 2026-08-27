@@ -26,6 +26,8 @@ class ReputationService:
                 channel_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 rep_type TEXT NOT NULL CHECK(rep_type IN ('plus', 'minus')),
+                amount INTEGER NOT NULL DEFAULT 1,
+                source TEXT NOT NULL DEFAULT 'user',
                 created_at TEXT NOT NULL
             );
 
@@ -42,10 +44,10 @@ class ReputationService:
             );
             """
         )
-        await self._ensure_target_message_column(db)
+        await self._ensure_event_columns(db)
         await db.commit()
 
-    async def _ensure_target_message_column(self, db: aiosqlite.Connection) -> None:
+    async def _ensure_event_columns(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(reputation_events)")
         rows = await cursor.fetchall()
         columns = {
@@ -54,6 +56,10 @@ class ReputationService:
         }
         if "target_message_id" not in columns:
             await db.execute("ALTER TABLE reputation_events ADD COLUMN target_message_id INTEGER")
+        if "amount" not in columns:
+            await db.execute("ALTER TABLE reputation_events ADD COLUMN amount INTEGER NOT NULL DEFAULT 1")
+        if "source" not in columns:
+            await db.execute("ALTER TABLE reputation_events ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
 
     async def can_give_rep(self, db: aiosqlite.Connection, guild_id: int, giver_id: int, limit: int = 2) -> bool:
         since = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
@@ -63,6 +69,7 @@ class ReputationService:
             FROM reputation_events
             WHERE guild_id = ?
               AND giver_user_id = ?
+              AND source = 'user'
               AND created_at >= ?
             """,
             (guild_id, giver_id, since),
@@ -90,10 +97,12 @@ class ReputationService:
                 channel_id,
                 message_id,
                 rep_type,
+                amount,
+                source,
                 created_at,
                 target_message_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 1, 'user', ?, ?)
             """
         event_parameters = (
             guild_id,
@@ -143,6 +152,93 @@ class ReputationService:
                 except BaseException:
                     await db.rollback()
                     raise
+
+    async def adjust_reputation(
+        self,
+        db: aiosqlite.Connection,
+        *,
+        guild_id: int,
+        actor_user_id: int,
+        receiver_user_id: int,
+        channel_id: int,
+        interaction_id: int,
+        delta: int,
+    ) -> tuple[int, int]:
+        if delta == 0:
+            raise ValueError("Reputation adjustment cannot be zero")
+
+        now_ts = datetime.now(UTC).isoformat()
+        rep_type = "plus" if delta > 0 else "minus"
+        amount = abs(delta)
+        if delta > 0:
+            update_sql = """
+                INSERT INTO user_reputation (guild_id, user_id, positive_rep, negative_rep, updated_at)
+                VALUES (?, ?, ?, 0, ?)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET positive_rep = positive_rep + excluded.positive_rep, updated_at = excluded.updated_at
+            """
+        else:
+            update_sql = """
+                INSERT INTO user_reputation (guild_id, user_id, positive_rep, negative_rep, updated_at)
+                VALUES (?, ?, 0, ?, ?)
+                ON CONFLICT(guild_id, user_id)
+                DO UPDATE SET negative_rep = negative_rep + excluded.negative_rep, updated_at = excluded.updated_at
+            """
+
+        async with sqlite_write_lock(db):
+            for attempt in range(len(self._lock_retry_delays) + 1):
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    previous_positive, previous_negative = await self.get_user_rep(db, guild_id, receiver_user_id)
+                    previous_total = previous_positive - previous_negative
+                    await db.execute(
+                        """
+                        INSERT INTO reputation_events (
+                            guild_id,
+                            giver_user_id,
+                            receiver_user_id,
+                            channel_id,
+                            message_id,
+                            rep_type,
+                            amount,
+                            source,
+                            created_at,
+                            target_message_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'admin', ?, NULL)
+                        """,
+                        (
+                            guild_id,
+                            actor_user_id,
+                            receiver_user_id,
+                            channel_id,
+                            interaction_id,
+                            rep_type,
+                            amount,
+                            now_ts,
+                        ),
+                    )
+                    await db.execute(update_sql, (guild_id, receiver_user_id, amount, now_ts))
+                    await db.commit()
+                    return previous_total, previous_total + delta
+                except aiosqlite.OperationalError as exc:
+                    await db.rollback()
+                    is_locked = "database is locked" in str(exc).lower()
+                    if not is_locked or attempt >= len(self._lock_retry_delays):
+                        raise
+                    delay = self._lock_retry_delays[attempt]
+                    logger.warning(
+                        "SQLite busy while writing admin reputation adjustment; retrying in %.2fs (attempt %s/%s)",
+                        delay,
+                        attempt + 1,
+                        len(self._lock_retry_delays),
+                    )
+                    await asyncio.sleep(delay)
+                except BaseException:
+                    await db.rollback()
+                    raise
+
+        raise RuntimeError("Reputation adjustment retry loop exited unexpectedly")
 
     async def get_user_rep(self, db: aiosqlite.Connection, guild_id: int, user_id: int) -> tuple[int, int]:
         cursor = await db.execute(

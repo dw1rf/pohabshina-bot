@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import random
+import re
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -140,6 +143,7 @@ class Track:
     source: str = "youtube"
     original_url: str | None = None
     thumbnail: str | None = None
+    http_headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -434,6 +438,12 @@ def _track_from_info(
     if not webpage_url or not stream_url:
         return None
     requester_name = getattr(requester, "display_name", None) or getattr(requester, "name", None) or "Пользователь"
+    raw_headers = info.get("http_headers")
+    http_headers = {
+        str(name): str(value)
+        for name, value in raw_headers.items()
+        if isinstance(raw_headers, dict) and value is not None
+    } if isinstance(raw_headers, dict) else {}
     return Track(
         title=str(title),
         webpage_url=str(webpage_url),
@@ -445,7 +455,32 @@ def _track_from_info(
         source=source,
         original_url=original_url or webpage_url,
         thumbnail=thumbnail or info.get("thumbnail"),
+        http_headers=http_headers,
     )
+
+
+def _ffmpeg_before_options(http_headers: dict[str, str] | None = None) -> str:
+    if not http_headers:
+        return FFMPEG_BEFORE_OPTIONS
+
+    header_lines: list[str] = []
+    for raw_name, raw_value in http_headers.items():
+        name = str(raw_name).strip()
+        if not re.fullmatch(r"[A-Za-z0-9-]+", name):
+            continue
+        value = " ".join(str(raw_value).replace("\r", " ").replace("\n", " ").split())
+        if value:
+            header_lines.append(f"{name}: {value}")
+    if not header_lines:
+        return FFMPEG_BEFORE_OPTIONS
+
+    header_block = "\r\n".join(header_lines) + "\r\n"
+    return f"{FFMPEG_BEFORE_OPTIONS} -headers {shlex.quote(header_block)}"
+
+
+def _safe_ffmpeg_error(error: Exception) -> str:
+    message = re.sub(r"https?://\S+", "<stream-url>", str(error))
+    return " ".join(message.split())[:500] or error.__class__.__name__
 
 
 class MusicCog(commands.Cog):
@@ -500,6 +535,13 @@ class MusicCog(commands.Cog):
             import nacl  # noqa: F401
         except ImportError:
             return "Голосовой модуль Discord не установлен. Проверьте discord.py[voice] и PyNaCl."
+        version = discord.version_info
+        if (version.major, version.minor, version.micro) < (2, 7, 1):
+            return "Голосовой модуль Discord устарел. Нужен discord.py 2.7.1+ с поддержкой DAVE."
+        try:
+            import davey  # noqa: F401
+        except ImportError:
+            return "Не установлен модуль DAVE для голоса Discord. Переустановите discord.py[voice] 2.7.1+."
         if yt_dlp is None:
             return "yt-dlp не установлен. Без него я не могу искать и включать музыку."
         return None
@@ -776,6 +818,8 @@ class MusicCog(commands.Cog):
         refreshed.source = track.source
         refreshed.original_url = track.original_url
         refreshed.thumbnail = track.thumbnail or refreshed.thumbnail
+        if not refreshed.http_headers:
+            refreshed.http_headers = track.http_headers
         return refreshed
 
     async def add_autoplay_track(self, player: MusicPlayer, previous: Track) -> bool:
@@ -865,11 +909,13 @@ class MusicCog(commands.Cog):
             except Exception:
                 logger.exception("yt-dlp failed to refresh stream URL: guild=%s title=%s", player.guild_id, track.title)
                 return False
+            ffmpeg_stderr = io.BytesIO()
             source = discord.FFmpegPCMAudio(
                 track.stream_url,
                 executable=ffmpeg_executable,
-                before_options=FFMPEG_BEFORE_OPTIONS,
+                before_options=_ffmpeg_before_options(track.http_headers),
                 options=FFMPEG_OPTIONS,
+                stderr=ffmpeg_stderr,
             )
         except RuntimeError as exc:
             logger.error("FFmpeg missing for music playback: %s", exc)
@@ -882,7 +928,12 @@ class MusicCog(commands.Cog):
 
         def after_play(error: Exception | None) -> None:
             if error:
-                logger.error("Music playback error: guild=%s error=%s", player.guild_id, error)
+                logger.error(
+                    "Music playback error: guild=%s error=%s ffmpeg_stderr_bytes=%s",
+                    player.guild_id,
+                    _safe_ffmpeg_error(error),
+                    len(ffmpeg_stderr.getvalue()),
+                )
             self.bot.loop.call_soon_threadsafe(
                 lambda: self.bot.loop.create_task(self.after_track(player.guild_id, error))
             )

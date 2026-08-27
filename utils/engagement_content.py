@@ -41,32 +41,6 @@ DEFAULT_ENGAGEMENT_CONTENT: dict[str, list[str]] = {
         "🤝 Репутация растёт там, где есть поддержка и уважение.",
         "✨ Спасибо, что отмечаете вклад других участников.",
     ],
-    "morning_messages": [
-        "🌞 Доброе утро, друзья!\n\nЖелаем вам отличного дня,\nхорошего настроения и приятного общения.\n\n☕ Не забудьте позавтракать и зарядиться энергией!",
-        "🌅 Новый день уже здесь!\n\nПусть он принесёт приятные разговоры,\nполезные дела и хорошее настроение.\n\n🍵 Начните утро спокойно и с улыбкой.",
-        "☀️ Доброе утро!\n\nПусть сегодня всё получается легче,\nа на сервере будет много тёплого общения.\n\n🥐 Время зарядиться энергией.",
-    ],
-    "morning_gifs": [
-        "https://media.giphy.com/media/3o7TKsQ8UQ4l4LhGz6/giphy.gif",
-        "https://media.giphy.com/media/ASd0Ukj0y3qMM/giphy.gif",
-    ],
-    "morning_images": [
-        "https://images.unsplash.com/photo-1490750967868-88aa4486c946?auto=format&fit=crop&w=1200&q=80",
-        "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=80",
-    ],
-    "night_messages": [
-        "🌙 Спокойной ночи!\n\nСпасибо всем за сегодняшний день.\nПусть завтрашний день принесёт много хорошего.\n\n✨ Сладких снов и приятного отдыха.",
-        "🌌 Время отдыхать.\n\nПусть ночь будет спокойной,\nа утро встретит вас новыми силами.\n\n💫 До завтра!",
-        "⭐ Спокойной ночи, друзья!\n\nСпасибо за активность и тёплое общение сегодня.\n\n🌙 Пусть сон будет крепким и приятным.",
-    ],
-    "night_gifs": [
-        "https://media.giphy.com/media/KD8Ldwzx90X9hi9QHW/giphy.gif",
-        "https://media.giphy.com/media/3o6Zt481isNVuQI1l6/giphy.gif",
-    ],
-    "night_images": [
-        "https://images.unsplash.com/photo-1507400492013-162706c8c05e?auto=format&fit=crop&w=1200&q=80",
-        "https://images.unsplash.com/photo-1475274047050-1d0c0975c63e?auto=format&fit=crop&w=1200&q=80",
-    ],
 }
 
 

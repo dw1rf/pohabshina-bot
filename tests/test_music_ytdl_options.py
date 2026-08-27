@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import shlex
+from types import SimpleNamespace
+
 from cogs import music
 from cogs.music import (
     _describe_cookie_file,
+    _ffmpeg_before_options,
     _is_ytdl_cookie_error,
     _resolve_cookie_file,
+    _track_from_info,
     _youtube_radio_url_as_single_track,
     _ytdl_cookie_state,
     _ytdl_options,
@@ -74,3 +79,55 @@ def test_regular_youtube_playlist_is_not_forced_to_single_track() -> None:
 
     assert forced_single is False
     assert normalized == url
+
+
+def test_track_preserves_ytdlp_http_headers_for_ffmpeg() -> None:
+    track = _track_from_info(
+        {
+            "title": "Track",
+            "webpage_url": "https://www.youtube.com/watch?v=test",
+            "url": "https://media.example.invalid/audio.webm",
+            "http_headers": {
+                "User-Agent": "yt-dlp-agent",
+                "Accept-Language": "ru-RU",
+            },
+        },
+        SimpleNamespace(id=7, display_name="Requester"),
+    )
+
+    assert track is not None
+    assert track.http_headers == {
+        "User-Agent": "yt-dlp-agent",
+        "Accept-Language": "ru-RU",
+    }
+
+
+def test_ffmpeg_options_forward_sanitized_ytdlp_headers() -> None:
+    options = _ffmpeg_before_options(
+        {
+            "User-Agent": "yt-dlp agent",
+            "Referer": "https://www.youtube.com/\r\n-injected 1",
+            "Bad Header": "ignored",
+        }
+    )
+    args = shlex.split(options)
+
+    header_block = args[args.index("-headers") + 1]
+    assert "User-Agent: yt-dlp agent\r\n" in header_block
+    assert "Referer: https://www.youtube.com/ -injected 1\r\n" in header_block
+    assert "Bad Header" not in header_block
+
+
+def test_music_rejects_discord_voice_stack_without_dave_support(monkeypatch) -> None:
+    cog = object.__new__(music.MusicCog)
+    cog._ffmpeg_executable = "ffmpeg"
+    monkeypatch.setattr(
+        music.discord,
+        "version_info",
+        SimpleNamespace(major=2, minor=6, micro=4),
+    )
+
+    error = cog.dependency_error()
+
+    assert error is not None
+    assert "discord.py 2.7.1+" in error

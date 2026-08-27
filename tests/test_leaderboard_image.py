@@ -3,6 +3,7 @@ from __future__ import annotations
 from utils.leaderboard_image import (
     LeaderboardImageRow,
     draw_leaderboard_image,
+    draw_reputation_card,
     load_font_stack,
     sanitize_leaderboard_name,
     draw_profile_card,
@@ -104,6 +105,27 @@ def test_profile_card_accepts_unlocked_accent_color() -> None:
 
     with Image.open(io.BytesIO(payload.getvalue())) as image:
         assert image.getpixel((200, 520))[0] > image.getpixel((200, 520))[2]
+
+
+def test_reputation_cards_support_both_signs_and_negative_totals() -> None:
+    cases = ((1, 12), (-1, 11), (-1, -7))
+    for change, total in cases:
+        payload = draw_reputation_card(
+            "Очень длинное имя участника с хвостом 🔥✨" * 2,
+            change,
+            total,
+            avatar=None,
+        )
+        with Image.open(io.BytesIO(payload.getvalue())) as image:
+            assert image.size == (1000, 460)
+        assert payload.getbuffer().nbytes < 8 * 1024 * 1024
+
+
+def test_reputation_card_rejects_zero_change() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="cannot be zero"):
+        draw_reputation_card("Игрок", 0, 10)
 
 
 def test_avatar_download_is_cached_and_has_safe_fallback() -> None:

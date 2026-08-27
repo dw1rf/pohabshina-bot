@@ -105,8 +105,22 @@ def log_voice_runtime(logger: logging.Logger) -> None:
         logger.debug("deno not found in PATH. yt-dlp may warn about missing JavaScript runtime for YouTube.")
 
     try:
+        import discord
+
+        logger.debug("Discord voice runtime: discord.py=%s", discord.__version__)
+    except ImportError:
+        logger.error("discord.py is not installed; Discord voice support is unavailable.")
+
+    try:
         import nacl  # noqa: F401
     except ImportError:
         logger.error("PyNaCl is not installed; Discord voice support is unavailable.")
     else:
         logger.debug("PyNaCl is installed; Discord voice support can load.")
+
+    try:
+        import davey  # noqa: F401
+    except ImportError:
+        logger.error("davey is not installed; current Discord DAVE voice sessions cannot transmit audio.")
+    else:
+        logger.debug("davey is installed; Discord DAVE voice support can load.")

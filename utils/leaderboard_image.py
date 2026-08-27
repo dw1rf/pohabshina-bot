@@ -728,6 +728,47 @@ def draw_profile_card(
     return output
 
 
+def draw_reputation_card(
+    name: str,
+    change: int,
+    total: int,
+    *,
+    avatar: bytes | None = None,
+    size: tuple[int, int] = (1000, 460),
+) -> io.BytesIO:
+    if change == 0:
+        raise ValueError("Reputation card change cannot be zero")
+
+    is_positive = change > 0
+    accent = (72, 207, 124) if is_positive else (237, 83, 104)
+    headline = "+РЕП" if is_positive else "-РЕП"
+    image = _themed_canvas(size, "reputation")
+    draw = ImageDraw.Draw(image, "RGBA")
+    label_font = load_font_stack(18, bold=True)
+    headline_font = load_font_stack(70, bold=True)
+    name_font = load_font_stack(38, bold=True, kind="name")
+    stat_font = load_font_stack(44, bold=True)
+
+    _draw_text(draw, (64, 48), BRAND_NAME.upper(), fill=(204, 193, 200, 240), font=label_font)
+    _draw_text(draw, (64, 82), headline, fill=(*accent, 255), font=headline_font)
+    draw.rounded_rectangle((64, 178, 936, 180), radius=1, fill=(*accent, 150))
+
+    avatar_image = _avatar_circle(avatar, 144, fallback=name)
+    image.alpha_composite(avatar_image, (64, 226))
+    fitted_name = _fit_text(draw, sanitize_leaderboard_name(name), name_font, 440)
+    _draw_text(draw, (236, 226), fitted_name, fill=(250, 247, 249, 255), font=name_font)
+
+    _draw_text(draw, (236, 292), "ИЗМЕНЕНИЕ", fill=(168, 157, 166, 255), font=label_font)
+    _draw_text(draw, (236, 324), f"{change:+d}", fill=(*accent, 255), font=stat_font)
+    _draw_text(draw, (548, 292), "ВСЕГО РЕПУТАЦИИ", fill=(168, 157, 166, 255), font=label_font)
+    _draw_text(draw, (548, 324), f"{total:+d}", fill=(250, 247, 249, 255), font=stat_font)
+
+    output = io.BytesIO()
+    image.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
+    output.seek(0)
+    return output
+
+
 def make_leaderboard_file(
     title: str,
     rows: Sequence[LeaderboardImageRow],
@@ -753,3 +794,19 @@ def make_profile_file(
 ) -> discord.File:
     image = draw_profile_card(name, headline, stats, avatar=avatar, progress=progress, theme=theme, accent=accent)
     return discord.File(image, filename=filename, description=description or f"{headline}: {name}")
+
+
+def make_reputation_file(
+    name: str,
+    change: int,
+    total: int,
+    *,
+    avatar: bytes | None = None,
+    filename: str = "reputation.png",
+) -> discord.File:
+    image = draw_reputation_card(name, change, total, avatar=avatar)
+    return discord.File(
+        image,
+        filename=filename,
+        description=f"Изменение репутации {name}: {change:+d}, всего {total:+d}",
+    )

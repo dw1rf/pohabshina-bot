@@ -97,7 +97,7 @@ def test_reputation_change_syncs_member_nickname_with_total_score() -> None:
         cog.bot = SimpleNamespace(db=object(), reputation=reputation)
         cog._resolve_target_message = AsyncMock(return_value=SimpleNamespace(id=88, author=receiver))
         cog._sync_member_reputation_nickname = AsyncMock(return_value=True)
-        cog._send_reputation_embed = AsyncMock()
+        cog._send_reputation_card = AsyncMock()
 
         await cog._handle_reputation_message(message, value=1)
 
@@ -106,6 +106,6 @@ def test_reputation_change_syncs_member_nickname_with_total_score() -> None:
             previous_total=8,
             new_total=9,
         )
-        cog._send_reputation_embed.assert_awaited_once_with(message, receiver, 1, 9)
+        cog._send_reputation_card.assert_awaited_once_with(message, receiver, 1, 9)
 
     asyncio.run(scenario())

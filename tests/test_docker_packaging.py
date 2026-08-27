@@ -27,3 +27,10 @@ def test_docker_context_includes_required_data_manifests() -> None:
     for dockerfile_name in ("Dockerfile", "Dockerfile.pterodactyl"):
         dockerfile = (PROJECT_ROOT / dockerfile_name).read_text(encoding="utf-8")
         assert "COPY catalog_data/*.json /app/catalog_data/" in dockerfile
+
+
+def test_voice_dependencies_include_current_discord_dave_stack() -> None:
+    requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+    assert "discord.py[voice]>=2.7.1" in requirements
+    assert "davey>=0.1.6" in requirements

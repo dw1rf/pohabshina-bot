@@ -19,7 +19,7 @@
 - `35` загружаемых модулей Discord;
 - Python `3.11`;
 - SQLite в WAL-режиме с автоматическими миграциями;
-- Docker-окружение с `ffmpeg`, `ffprobe`, `deno` и `libopus0`;
+- Docker-окружение с `ffmpeg`, `ffprobe`, `deno`, `libopus0` и актуальным DAVE-голосом Discord;
 - восстановление persistent-кнопок, активных тюрем, розыгрышей и задач после
   перезапуска;
 - регрессионный набор: `111` тестов.
@@ -130,7 +130,6 @@ LOG_LEVEL=INFO
 | `MOD_LOG_CHANNEL_ID` | Канал модераторских логов и jail-апелляций. |
 | `SUPPORT_CATEGORY_ID` | Категория приватных support-тикетов. |
 | `SUPPORT_ADMIN_ROLE_ID` | Роль сотрудников поддержки. |
-| `DAILY_MESSAGE_CHANNEL_ID` | Канал автоматических сообщений. |
 | `BIRTHDAY_CHANNEL_ID` | Канал поздравлений с днём рождения. |
 | `TIMEZONE` | Часовой пояс расписаний, обычно `Europe/Moscow`. |
 | `FFMPEG_EXECUTABLE` | Необязательный нестандартный путь к `ffmpeg`. |
@@ -166,6 +165,7 @@ ffmpeg found: path=...
 ffprobe found: path=...
 deno found: path=...
 PyNaCl is installed; Discord voice support can load.
+davey is installed; Discord DAVE voice support can load.
 ```
 
 ## Данные и устойчивость

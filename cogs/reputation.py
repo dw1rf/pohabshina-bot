@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 from collections import deque
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.leaderboard_image import make_reputation_file, resolve_avatar_bytes
 from utils.message_commands import REPUTATION_COMMANDS, reputation_change
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,12 @@ def format_reputation_nickname(
 
 
 class ReputationCog(commands.Cog):
+    reputation_admin_group = app_commands.Group(
+        name="reputation_admin",
+        description="Административное управление репутацией",
+        default_permissions=discord.Permissions(administrator=True),
+    )
+
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self.last_messages_by_channel: dict[int, deque[discord.Message]] = {}
@@ -141,7 +148,11 @@ class ReputationCog(commands.Cog):
                     previous_total=total_rep - value,
                     new_total=total_rep,
                 )
-            await self._send_reputation_embed(message, receiver, value, total_rep)
+            try:
+                await self._send_reputation_card(message, receiver, value, total_rep)
+            except Exception:
+                logger.exception("Reputation changed but the result card could not be sent: message=%s", message.id)
+                await message.channel.send("Репутация изменена, но не удалось отправить картинку.")
         except Exception:
             logger.exception("Failed to process reputation message %s", message.id)
             await message.channel.send("Произошла ошибка при изменении репутации. Попробуйте позже.")
@@ -182,36 +193,84 @@ class ReputationCog(commands.Cog):
             return False
         return True
 
-    async def _send_reputation_embed(
+    async def _send_reputation_card(
         self,
         message: discord.Message,
         receiver: discord.Member | discord.User,
         value: int,
         total_rep: int,
     ) -> None:
-        is_positive = value > 0
-        change_text = "➕ Получена положительная репутация" if is_positive else "➖ Получена отрицательная репутация"
-        change_value = f"{value:+d}"
-        color = discord.Color.green() if is_positive else discord.Color.red()
-        phrases = self.bot.engagement_content.list("reputation_messages")
-        phrase = random.choice(phrases) if phrases else "💬 Репутация показывает доверие сообщества."
-
-        embed = discord.Embed(
-            title="╭──── ❤️ РЕПУТАЦИЯ ❤️ ────╮",
-            description=(
-                f"👤 {message.author.mention} оценил участника {receiver.mention}\n\n"
-                f"{change_text}\n\n"
-                f"📈 Изменение репутации: **{change_value}**\n\n"
-                f"⭐ Всего репутации: **{total_rep}**\n\n"
-                f"{phrase}\n\n"
-                "╰────────────────────────╯"
-            ),
-            color=color,
+        display_name = receiver.display_name
+        reputation_prefix = f"{total_rep:+d} "
+        if display_name.startswith(reputation_prefix):
+            display_name = display_name[len(reputation_prefix) :]
+        avatar = await resolve_avatar_bytes(self.bot, message.guild, receiver.id)
+        file = make_reputation_file(
+            display_name,
+            value,
+            total_rep,
+            avatar=avatar,
+            filename=f"reputation-{message.id}.png",
         )
-        embed.set_thumbnail(url=receiver.display_avatar.url)
         await message.channel.send(
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(users=True),
+            file=file,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @reputation_admin_group.command(name="change", description="Изменить репутацию участника на указанное число")
+    @app_commands.describe(member="Участник", amount="Положительное число добавит репутацию, отрицательное — убавит")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def admin_change_reputation(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        amount: app_commands.Range[int, -1_000_000, 1_000_000],
+    ) -> None:
+        db = getattr(self.bot, "reputation_db", None) or self.bot.db
+        if interaction.guild is None or db is None:
+            await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
+            return
+        if int(amount) == 0:
+            await interaction.response.send_message("Изменение репутации не может быть нулевым.", ephemeral=True)
+            return
+        if member.bot:
+            await interaction.response.send_message("Ботам репутацию менять нельзя.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            previous_total, new_total = await self.bot.reputation.adjust_reputation(
+                db,
+                guild_id=interaction.guild.id,
+                actor_user_id=interaction.user.id,
+                receiver_user_id=member.id,
+                channel_id=interaction.channel_id or 0,
+                interaction_id=interaction.id,
+                delta=int(amount),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to adjust reputation from admin command: guild=%s actor=%s receiver=%s delta=%s",
+                interaction.guild.id,
+                interaction.user.id,
+                member.id,
+                amount,
+            )
+            await interaction.followup.send(
+                "Не удалось изменить репутацию. Попробуйте позже.",
+                ephemeral=True,
+            )
+            return
+        nickname_changed = await self._sync_member_reputation_nickname(
+            member,
+            previous_total=previous_total,
+            new_total=new_total,
+        )
+        nickname_status = "Ник обновлён." if nickname_changed else "Репутация сохранена, но ник изменить не удалось."
+        await interaction.followup.send(
+            f"Репутация {member.mention}: **{previous_total:+d} → {new_total:+d}**. {nickname_status}",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     async def _resolve_target_message(self, message: discord.Message) -> discord.Message | None:
