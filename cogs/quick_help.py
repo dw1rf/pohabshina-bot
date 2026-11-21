@@ -9,6 +9,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.bot_profile import LAUNCHER_NAME, LAUNCHER_URL
+from utils.module_activity import ActivityView
 from utils.brand import BRAND_NAME
 
 logger = logging.getLogger(__name__)
@@ -56,10 +58,11 @@ async def safe_reply(
         logger.exception("Failed to send quick-help interaction response: guild=%s", interaction.guild_id)
 
 
-class QuickHelpButtons(discord.ui.View):
+class QuickHelpButtons(ActivityView):
     def __init__(self, cog: QuickHelpCog) -> None:
         super().__init__(timeout=180)
         self.cog = cog
+        self.add_item(discord.ui.Button(label=LAUNCHER_NAME, url=LAUNCHER_URL))
 
     @discord.ui.button(label="Правила", emoji="📜", style=discord.ButtonStyle.secondary)
     async def rules(self, interaction: discord.Interaction, button: discord.ui.Button[QuickHelpButtons]) -> None:
@@ -73,7 +76,7 @@ class QuickHelpButtons(discord.ui.View):
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button[QuickHelpButtons]) -> None:
         embed = discord.Embed(
             title="Магазин",
-            description="Если магазин настроен, открой канал с услугами или используй `/shop_panel`, если его опубликовала администрация.",
+            description="Игровые предметы доступны через `/shop browse`. Ссылку на канал магазина ищи среди кнопок ниже.",
             color=discord.Color.blurple(),
         )
         await safe_reply(interaction, embed=embed, view=self.cog.link_view(interaction.guild), ephemeral=True)
@@ -82,7 +85,7 @@ class QuickHelpButtons(discord.ui.View):
     async def support(self, interaction: discord.Interaction, button: discord.ui.Button[QuickHelpButtons]) -> None:
         embed = discord.Embed(
             title="Поддержка",
-            description="Опиши вопрос в канале поддержки или создай обращение через опубликованную панель поддержки.",
+            description="Опиши вопрос в канале поддержки или обратись к модератору сервера.",
             color=discord.Color.green(),
         )
         await safe_reply(interaction, embed=embed, view=self.cog.link_view(interaction.guild), ephemeral=True)

@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from cogs.social_game_content import PET_TYPES
 from services.social_game_service import utcnow_iso
 from services.community_ops_service import normalize_user_text
@@ -65,7 +66,7 @@ class PetRenameModal(discord.ui.Modal, title="Переименовать пит�
         await self.cog.refresh_menu(interaction)
 
 
-class PetMenuView(discord.ui.View):
+class PetMenuView(ActivityView):
     def __init__(self, cog: "PetsCog", owner_id: int, *, has_pet: bool) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -151,7 +152,7 @@ class PetMenuView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=PetBackView(self.cog, self.owner_id))
 
 
-class PetBackView(discord.ui.View):
+class PetBackView(ActivityView):
     def __init__(self, cog: "PetsCog", owner_id: int) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -168,7 +169,7 @@ class PetBackView(discord.ui.View):
         await self.cog.refresh_menu(interaction)
 
 
-class PetBattleChallengeView(discord.ui.View):
+class PetBattleChallengeView(ActivityView):
     def __init__(self, cog: "PetsCog", challenger_id: int, defender_id: int) -> None:
         super().__init__(timeout=60)
         self.cog = cog

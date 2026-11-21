@@ -136,6 +136,7 @@ class ReputationCog(commands.Cog):
                     rep_type=rep_type,
                     target_message_id=target_message.id,
                 )
+            self.bot.dispatch("module_activity", message.guild.id, message.author.id, "reputation", "reputation")
             positive_rep, negative_rep = await self.bot.reputation.get_user_rep(
                 db,
                 message.guild.id,

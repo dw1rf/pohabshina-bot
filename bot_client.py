@@ -11,8 +11,7 @@ import aiohttp
 import aiosqlite
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
-from mcstatus import JavaServer
+from discord.ext import commands
 
 from config import Settings
 from services.jail_service import JailService
@@ -20,13 +19,12 @@ from services.level_service import LevelService
 from services.reputation_service import ReputationService
 from services.reaction_ban_service import ReactionBanService
 from services.reaction_role_service import ReactionRoleService
-from services.support_ticket_service import SupportTicketService
-from services.watchmode_service import WatchmodeService
 from services.social_game_service import SocialGameService
 from services.economy_service import EconomyService
 from services.progression_service import ProgressionService
 from services.community_ops_service import CommunityOpsService
 from services.automod_service import AutomodService
+from utils.bot_profile import LAUNCHER_ACTIVITY, sync_profile
 from utils.command_localizations import RussianCommandNameTranslator
 from utils.engagement_content import EngagementContent, load_engagement_content
 from utils.voice_runtime import find_ffmpeg, log_voice_runtime
@@ -39,7 +37,7 @@ class MovieBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=intents, activity=discord.Game(name=LAUNCHER_ACTIVITY))
 
         self.settings = settings
         self.session: aiohttp.ClientSession | None = None
@@ -57,22 +55,17 @@ class MovieBot(commands.Bot):
         self.giveaway_db: aiosqlite.Connection | None = None
         self.delivery_db: aiosqlite.Connection | None = None
 
-        self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
         self.jails = JailService()
         self.reputation = ReputationService()
         self.reaction_bans = ReactionBanService()
         self.reaction_roles = ReactionRoleService()
-        self.support_tickets = SupportTicketService()
         self.social_games = SocialGameService()
         self.economy = EconomyService()
         self.progression = ProgressionService()
         self.engagement_content: EngagementContent = load_engagement_content(settings.engagement_content_path)
         self._extensions_bootstrapped = False
-        self._support_category_logged = False
-        self._last_mc_status_error: str | None = None
         self._bad_mod_log_channel_ids: set[int] = set()
-        self._mc_server = JavaServer("5.83.140.210", 25780)
 
     async def load_cogs(self) -> tuple[list[str], list[str], list[str]]:
         cogs_dir = Path(__file__).resolve().parent / "cogs"
@@ -133,12 +126,17 @@ class MovieBot(commands.Bot):
         self._backup_database_before_migrations()
         self.db = await self._open_database_connection()
 
+        if self.user is not None and self.application is not None:
+            try:
+                await sync_profile(self.db, self.user, self.application)
+            except (OSError, sqlite3.Error, discord.HTTPException, discord.RateLimited):
+                logger.exception("Could not update bot profile. Will retry on next startup.")
+
         await self.levels.init_db(self.db)
         await self.jails.init_db(self.db)
         await self.reputation.init_rep_db(self.db)
         await self.reaction_bans.init_db(self.db)
         await self.reaction_roles.init_db(self.db)
-        await self.support_tickets.init_db(self.db)
         await self.social_games.init_db(self.db)
         # Critical moderation/reputation transactions must not share a
         # connection with unrelated listeners that can commit mid-operation.
@@ -154,7 +152,6 @@ class MovieBot(commands.Bot):
         self.automod_db = await self._open_database_connection()
         self.giveaway_db = await self._open_database_connection()
         self.delivery_db = await self._open_database_connection()
-        await self.watchmode.load_genres(self.session)
         log_voice_runtime(logger)
 
         loaded_cogs, skipped_cogs, failed_cogs = await self.load_cogs()
@@ -246,8 +243,6 @@ class MovieBot(commands.Bot):
         logger.info("Created pre-migration database backup: %s", backup_path)
 
     async def close(self) -> None:
-        if self.minecraft_presence_loop.is_running():
-            self.minecraft_presence_loop.cancel()
         if self.session and not self.session.closed:
             await self.session.close()
         connections = (
@@ -270,95 +265,7 @@ class MovieBot(commands.Bot):
         await super().close()
 
     async def on_ready(self) -> None:
-        if not self.minecraft_presence_loop.is_running():
-            self.minecraft_presence_loop.start()
         logger.debug("Logged in as %s (ID: %s)", self.user, self.user.id if self.user else "unknown")
-        if not self._support_category_logged:
-            self._support_category_logged = True
-            await self.log_support_category_startup_diagnostics()
-
-    @staticmethod
-    def _missing_support_permissions(permissions: discord.Permissions) -> list[str]:
-        required = {
-            "view_channel": permissions.view_channel,
-            "manage_channels": permissions.manage_channels,
-            "manage_permissions": permissions.manage_roles,
-            "send_messages": permissions.send_messages,
-            "embed_links": permissions.embed_links,
-            "read_message_history": permissions.read_message_history,
-        }
-        return [name for name, allowed in required.items() if not allowed]
-
-    async def log_support_category_startup_diagnostics(self) -> None:
-        if self.settings.support_category_error:
-            logger.warning("%s", self.settings.support_category_error)
-            return
-
-        category_id = self.settings.support_category_id
-        cached = self.get_channel(category_id)
-        category: discord.CategoryChannel | None = cached if isinstance(cached, discord.CategoryChannel) else None
-        if cached is not None and category is None:
-            logger.warning("SUPPORT_CATEGORY_ID points to %s, not CategoryChannel: id=%s", type(cached).__name__, category_id)
-            return
-
-        if category is None:
-            try:
-                fetched = await self.fetch_channel(category_id)
-            except discord.NotFound:
-                logger.warning("Support category not found through cache or fetch: id=%s", category_id)
-                return
-            except discord.Forbidden:
-                logger.warning("Support category fetch forbidden: id=%s", category_id)
-                return
-            except discord.HTTPException as exc:
-                logger.warning("Support category fetch failed: id=%s error=%s", category_id, exc)
-                return
-            if not isinstance(fetched, discord.CategoryChannel):
-                logger.warning("SUPPORT_CATEGORY_ID points to %s, not CategoryChannel: id=%s", type(fetched).__name__, category_id)
-                return
-            category = fetched
-
-        me = category.guild.me
-        if me is None and self.user is not None:
-            me = category.guild.get_member(self.user.id)
-        if me is None:
-            logger.warning("Support category found but bot member is unavailable: id=%s guild=%s", category.id, category.guild.id)
-            return
-
-        missing = self._missing_support_permissions(category.permissions_for(me))
-        if missing:
-            logger.warning(
-                "Support category permissions missing: id=%s guild=%s missing=%s",
-                category.id,
-                category.guild.id,
-                ",".join(missing),
-            )
-            return
-        logger.info("Support category ready: id=%s guild=%s name=%s", category.id, category.guild.id, category.name)
-
-    @tasks.loop(seconds=60)
-    async def minecraft_presence_loop(self) -> None:
-        try:
-            status = await self._mc_server.async_status()
-            online = status.players.online
-            max_players = status.players.max
-            activity = discord.Game(name=f"Онлайн: {online}/{max_players}")
-        except Exception as exc:
-            message = str(exc) or exc.__class__.__name__
-            if message != self._last_mc_status_error:
-                logger.warning("Failed to fetch Minecraft server status: %s", message)
-                logger.debug("Minecraft server status traceback", exc_info=True)
-                self._last_mc_status_error = message
-            activity = discord.Game(name="Онлайн: offline")
-        try:
-            await self.change_presence(status=discord.Status.online, activity=activity)
-        except Exception as exc:
-            logger.warning("Failed to update Minecraft presence: %s", exc)
-            logger.debug("Minecraft presence traceback", exc_info=True)
-
-    @minecraft_presence_loop.before_loop
-    async def before_minecraft_presence_loop(self) -> None:
-        await self.wait_until_ready()
 
     async def send_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> bool:
         if not self.settings.mod_log_channel_id:

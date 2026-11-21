@@ -94,7 +94,7 @@ def test_reputation_change_syncs_member_nickname_with_total_score() -> None:
             get_user_rep=AsyncMock(return_value=(12, 3)),
         )
         cog = object.__new__(ReputationCog)
-        cog.bot = SimpleNamespace(db=object(), reputation=reputation)
+        cog.bot = SimpleNamespace(db=object(), reputation=reputation, dispatch=Mock())
         cog._resolve_target_message = AsyncMock(return_value=SimpleNamespace(id=88, author=receiver))
         cog._sync_member_reputation_nickname = AsyncMock(return_value=True)
         cog._send_reputation_card = AsyncMock()

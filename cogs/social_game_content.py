@@ -1,20 +1,5 @@
 from __future__ import annotations
 
-SHOP_DEFAULT_INSTRUCTION = (
-    "Спасибо за выбор услуги. Опишите детали заказа, дождитесь администратора и не переводите оплату посредникам."
-)
-
-SERVICE_INSTRUCTIONS: dict[str, str] = {
-    # твои инструкции услуг (оставь как было)
-    "unban": (
-        "Describe the ban details, account ID, ban reason if known, and wait for an administrator. "
-        "Do not send payment until an administrator confirms the request."
-    ),
-}
-
-SHOP_SERVICE_INSTRUCTIONS = SERVICE_INSTRUCTIONS
-SHOP_URL = "https://murkas-shop.easydonate.ru/"
-
 RP_ACTIONS: dict[str, dict[str, str | bool]] = {
     "погладить": {"label": "погладить", "text": "медленно и властно гладит по телу, наслаждаясь дрожью и мурашками.", "nsfw": True},
     "щекотать": {"label": "пощекотать", "text": "безжалостно щекочет, заставляя корчиться, смеяться и умолять остановиться.", "nsfw": True},

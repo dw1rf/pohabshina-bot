@@ -120,6 +120,7 @@ def test_concurrent_reputation_messages_respect_giver_limit() -> None:
             db=object(),
             reputation_db=object(),
             reputation=reputation,
+            dispatch=Mock(),
             command_prefix="!",
         )
         cog = ReputationCog(bot)
@@ -138,6 +139,7 @@ def test_concurrent_reputation_messages_respect_giver_limit() -> None:
         )
 
         assert reputation.count == 2
+        bot.dispatch.assert_called_once_with("module_activity", guild.id, giver.id, "reputation", "reputation")
         assert cog._send_reputation_card.await_count == 1
         assert any("Лимит репутации" in str(call.args[0]) for call in channel.send.await_args_list)
 

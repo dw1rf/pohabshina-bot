@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
-from utils.brand import BRAND_ACCENT
+from utils.brand import BRAND_COLOR
 
 logger = logging.getLogger(__name__)
 
@@ -132,20 +132,22 @@ class StarboardCog(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         if payload.guild_id is not None and str(payload.emoji) == "⭐":
-            await self._refresh(payload.guild_id, payload.channel_id, payload.message_id)
+            voter = payload.member or self.bot.get_user(payload.user_id)
+            await self._refresh(payload.guild_id, payload.channel_id, payload.message_id,
+                                voter_id=voter.id if voter and not voter.bot else None)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         if payload.guild_id is not None and str(payload.emoji) == "⭐":
             await self._refresh(payload.guild_id, payload.channel_id, payload.message_id)
 
-    async def _refresh(self, guild_id: int, channel_id: int, message_id: int) -> None:
+    async def _refresh(self, guild_id: int, channel_id: int, message_id: int, *, voter_id: int | None = None) -> None:
         key = (guild_id, message_id)
         lock = self._message_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            await self._refresh_locked(guild_id, channel_id, message_id)
+            await self._refresh_locked(guild_id, channel_id, message_id, voter_id=voter_id)
 
-    async def _refresh_locked(self, guild_id: int, channel_id: int, message_id: int) -> None:
+    async def _refresh_locked(self, guild_id: int, channel_id: int, message_id: int, *, voter_id: int | None) -> None:
         if self.bot.db is None:
             return
         settings = await self._settings(guild_id)
@@ -159,12 +161,24 @@ class StarboardCog(commands.Cog):
         target_channel = guild.get_channel(int(settings["channel_id"])) if guild else None
         if not isinstance(source_channel, discord.TextChannel) or not isinstance(target_channel, discord.TextChannel):
             return
+        # Republishing text and images must respect the source channel's audience.
+        if source_channel.is_nsfw() and not target_channel.is_nsfw():
+            return
+        public = source_channel.permissions_for(guild.default_role)
+        restricted = not (public.view_channel and public.read_message_history) or any(
+            overwrite.view_channel is False or overwrite.read_message_history is False
+            for overwrite in source_channel.overwrites.values()
+        )
+        if restricted and source_channel.overwrites != target_channel.overwrites:
+            return
         try:
             source = await source_channel.fetch_message(message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             return
         if source.author.bot:
             return
+        if voter_id is not None:
+            self.bot.dispatch("module_activity", guild_id, voter_id, "starboard", "reaction")
         stars = next((reaction.count for reaction in source.reactions if str(reaction.emoji) == "⭐"), 0)
         cursor = await self.bot.db.execute(
             "SELECT starboard_message_id FROM starboard_posts WHERE guild_id = ? AND source_message_id = ?",
@@ -183,7 +197,7 @@ class StarboardCog(commands.Cog):
                 )
                 await self.bot.db.commit()
             return
-        embed = discord.Embed(description=source.content[:4000] or "Сообщение без текста", color=BRAND_ACCENT)
+        embed = discord.Embed(description=source.content[:4000] or "Сообщение без текста", color=BRAND_COLOR)
         embed.set_author(name=source.author.display_name, icon_url=source.author.display_avatar.url)
         embed.add_field(name="Источник", value=f"[Перейти к сообщению]({source.jump_url})", inline=False)
         if source.attachments and source.attachments[0].content_type and source.attachments[0].content_type.startswith("image/"):

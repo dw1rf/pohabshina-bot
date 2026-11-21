@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from services.community_ops_service import (
     ActiveSuggestionLimit,
     CommunityOpsService,
@@ -53,7 +54,7 @@ def _suggestion_embed(record: SuggestionRecord, tally: VoteTally) -> discord.Emb
     return embed
 
 
-class SuggestionView(discord.ui.View):
+class SuggestionView(ActivityView):
     def __init__(self, cog: object, suggestion_id: int) -> None:
         super().__init__(timeout=None)
         self.cog = cog

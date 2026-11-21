@@ -8,6 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from cogs.social_game_content import STORY_SCENES
 from services.social_game_service import utcnow_iso
 
@@ -38,7 +39,7 @@ class StoryChoiceButton(discord.ui.Button):
         await self.view.cog.apply_choice(interaction, self.choice)
 
 
-class StoryMenuView(discord.ui.View):
+class StoryMenuView(ActivityView):
     def __init__(self, cog: "StoryCog", user_id: int, *, started: bool, choices: list[dict] | None = None) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -93,7 +94,7 @@ class StoryMenuView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=StoryBackView(self.cog, self.user_id))
 
 
-class StoryBackView(discord.ui.View):
+class StoryBackView(ActivityView):
     def __init__(self, cog: "StoryCog", user_id: int) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -110,7 +111,7 @@ class StoryBackView(discord.ui.View):
         await self.cog.refresh_menu(interaction)
 
 
-class StoryResetConfirmView(discord.ui.View):
+class StoryResetConfirmView(ActivityView):
     def __init__(self, cog: "StoryCog", user_id: int) -> None:
         super().__init__(timeout=120)
         self.cog = cog
