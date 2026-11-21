@@ -271,6 +271,9 @@ class ReactionRolesCog(commands.Cog):
             logger.warning("No permissions to modify role %s for user %s", role.id, member.id)
         except discord.HTTPException:
             logger.exception("Failed to modify reaction role")
+        else:
+            if add_role:
+                self.bot.dispatch("module_activity", guild.id, member.id, "reaction_roles", "reaction")
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:

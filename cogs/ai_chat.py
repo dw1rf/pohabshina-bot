@@ -18,6 +18,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from services.ai_persona_service import AIPersonaService
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,7 @@ class AIRateLimited(Exception):
     pass
 
 
-class AfishaConfirmView(discord.ui.View):
+class AfishaConfirmView(ActivityView):
     def __init__(self, author_id: int, target_channel: discord.TextChannel, text: str) -> None:
         super().__init__(timeout=120)
         self.author_id = author_id

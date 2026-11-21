@@ -12,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from utils.brand import BRAND_COLOR
 from utils.sqlite_writes import sqlite_write_lock
 
@@ -29,7 +30,7 @@ async def giveaway_write(db: aiosqlite.Connection):
             raise
 
 
-class GiveawayView(discord.ui.View):
+class GiveawayView(ActivityView):
     def __init__(self, bot: MovieBot, giveaway_id: int) -> None:
         super().__init__(timeout=None)
         self.bot = bot

@@ -132,20 +132,22 @@ class StarboardCog(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         if payload.guild_id is not None and str(payload.emoji) == "⭐":
-            await self._refresh(payload.guild_id, payload.channel_id, payload.message_id)
+            voter = payload.member or self.bot.get_user(payload.user_id)
+            await self._refresh(payload.guild_id, payload.channel_id, payload.message_id,
+                                voter_id=voter.id if voter and not voter.bot else None)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         if payload.guild_id is not None and str(payload.emoji) == "⭐":
             await self._refresh(payload.guild_id, payload.channel_id, payload.message_id)
 
-    async def _refresh(self, guild_id: int, channel_id: int, message_id: int) -> None:
+    async def _refresh(self, guild_id: int, channel_id: int, message_id: int, *, voter_id: int | None = None) -> None:
         key = (guild_id, message_id)
         lock = self._message_locks.setdefault(key, asyncio.Lock())
         async with lock:
-            await self._refresh_locked(guild_id, channel_id, message_id)
+            await self._refresh_locked(guild_id, channel_id, message_id, voter_id=voter_id)
 
-    async def _refresh_locked(self, guild_id: int, channel_id: int, message_id: int) -> None:
+    async def _refresh_locked(self, guild_id: int, channel_id: int, message_id: int, *, voter_id: int | None) -> None:
         if self.bot.db is None:
             return
         settings = await self._settings(guild_id)
@@ -175,6 +177,8 @@ class StarboardCog(commands.Cog):
             return
         if source.author.bot:
             return
+        if voter_id is not None:
+            self.bot.dispatch("module_activity", guild_id, voter_id, "starboard", "reaction")
         stars = next((reaction.count for reaction in source.reactions if str(reaction.emoji) == "⭐"), 0)
         cursor = await self.bot.db.execute(
             "SELECT starboard_message_id FROM starboard_posts WHERE guild_id = ? AND source_message_id = ?",

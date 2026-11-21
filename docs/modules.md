@@ -8,7 +8,7 @@
 
 | Модуль | Что делает | Где посмотреть использование или зависимость |
 | --- | --- | --- |
-| `command_stats` | Админская статистика использования команд сервера. | Отчёт по команде, участнику и периоду. |
+| `command_stats` | Админская статистика команд, кнопок, реакций и репутации. | `view:modules` показывает охват и действия по модулям, `view:inactive` — модули без учтённых действий. |
 | `moderation` | Предупреждения, тайм-ауты, бан, кик, тюрьма и публикация правил. Бот сам снимает тюремную роль по расписанию. | Журнал модерации, таблицы `warnings` и `active_jails`. Перед отключением проверить действующие наказания. |
 | `automod` | Проверяет сообщения и вход новых участников, применяет правила спама и защиты от рейдов. | Настройки и `automod_incidents`. `levels` и `social_profile` используют результат проверки для учёта активности. |
 | `ping_guard` | Реагирует на повторные упоминания отсутствующего участника, может послать уведомление в ЛС. | `smart_notifications` и `ping_events`. Работает при сообщениях. |
@@ -62,7 +62,7 @@
 
 ### command_stats
 
-`/command_stats`. Обрабатывает завершение команд Discord и текстовых команд с префиксом.
+`/command_stats`. Для оценки востребованности сравните число участников и типы действий за 30–90 дней. Кнопки и меню, реакции Starboard и выдачи ролей, а также успешные `+реп` и `-реп` учитываются с момента установки этой версии. При оценке автоматических модулей дополнительно проверьте их доставки и срабатывания.
 
 ### moderation
 
@@ -240,12 +240,12 @@
 
 ## Общий код
 
-`bot.py` запускает приложение, `config.py` читает конфигурацию, `bot_client.py` открывает соединения с SQLite, загружает расширения, синхронизирует команды и обновляет статус Minecraft-сервера. Обновление статуса работает в ядре бота.
+`bot.py` запускает приложение, `config.py` читает конфигурацию, `bot_client.py` открывает соединения с SQLite, загружает расширения, синхронизирует команды и устанавливает игровую активность BlockEra Launcher. Кнопка лаунчера доступна в `/helpme` и `/how`.
 
 В каталоге `cogs/` также находятся два вспомогательных модуля. `music_resolvers.py` разбирает ссылки музыкальных сервисов для `music`. `social_game_content.py` содержит данные для `pets`, `roleplay` и `story`.
 
 В `services/` находятся `ai_persona_service`, `automod_service`, `community_ops_service`, `economy_service`, `jail_service`, `level_service`, `progression_service`, `reaction_ban_service`, `reaction_role_service`, `reputation_service`, `social_game_service`.
 
-В `utils/` находятся `brand`, `command_localizations`, `embed_format`, `embeds`, `engagement_content`, `helpers`, `leaderboard_image`, `message_commands`, `permissions`, `sqlite_writes`, `static_data`, `tts_text_filter`, `voice_runtime`. Файлы `__init__.py` обозначают пакеты.
+В `utils/` находятся `bot_profile`, `brand`, `command_localizations`, `embed_format`, `embeds`, `engagement_content`, `helpers`, `leaderboard_image`, `message_commands`, `module_activity`, `permissions`, `sqlite_writes`, `static_data`, `tts_text_filter`, `voice_runtime`. Файлы `__init__.py` обозначают пакеты.
 
 Планируя отключение, учитывайте существующие кнопки розыгрышей, сроки наказаний и ожидающие награды. Загрузчик расширений и инициализация общих сервисов находятся в разных частях `bot_client.py`. Удаление файла расширения само по себе не останавливает запись в общие таблицы другими модулями.

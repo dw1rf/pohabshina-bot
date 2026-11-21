@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class RatingCommentModal(discord.ui.Modal, title="Комментарий к фи
         await self.cog.save_comment(interaction, self.session_id, str(self.comment.value or "").strip())
 
 
-class MovieRatingView(discord.ui.View):
+class MovieRatingView(ActivityView):
     def __init__(self, cog: MovieRatingCog, session_id: int, *, disabled: bool = False) -> None:
         super().__init__(timeout=None)
         self.cog = cog

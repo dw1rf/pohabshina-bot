@@ -11,8 +11,7 @@ import aiohttp
 import aiosqlite
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
-from mcstatus import JavaServer
+from discord.ext import commands
 
 from config import Settings
 from services.jail_service import JailService
@@ -25,6 +24,7 @@ from services.economy_service import EconomyService
 from services.progression_service import ProgressionService
 from services.community_ops_service import CommunityOpsService
 from services.automod_service import AutomodService
+from utils.bot_profile import LAUNCHER_ACTIVITY, sync_profile
 from utils.command_localizations import RussianCommandNameTranslator
 from utils.engagement_content import EngagementContent, load_engagement_content
 from utils.voice_runtime import find_ffmpeg, log_voice_runtime
@@ -37,7 +37,7 @@ class MovieBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=intents, activity=discord.Game(name=LAUNCHER_ACTIVITY))
 
         self.settings = settings
         self.session: aiohttp.ClientSession | None = None
@@ -65,9 +65,7 @@ class MovieBot(commands.Bot):
         self.progression = ProgressionService()
         self.engagement_content: EngagementContent = load_engagement_content(settings.engagement_content_path)
         self._extensions_bootstrapped = False
-        self._last_mc_status_error: str | None = None
         self._bad_mod_log_channel_ids: set[int] = set()
-        self._mc_server = JavaServer("5.83.140.210", 25780)
 
     async def load_cogs(self) -> tuple[list[str], list[str], list[str]]:
         cogs_dir = Path(__file__).resolve().parent / "cogs"
@@ -127,6 +125,12 @@ class MovieBot(commands.Bot):
         self._prepare_database_path()
         self._backup_database_before_migrations()
         self.db = await self._open_database_connection()
+
+        if self.user is not None and self.application is not None:
+            try:
+                await sync_profile(self.db, self.user, self.application)
+            except (OSError, sqlite3.Error, discord.HTTPException, discord.RateLimited):
+                logger.exception("Could not update bot profile. Will retry on next startup.")
 
         await self.levels.init_db(self.db)
         await self.jails.init_db(self.db)
@@ -239,8 +243,6 @@ class MovieBot(commands.Bot):
         logger.info("Created pre-migration database backup: %s", backup_path)
 
     async def close(self) -> None:
-        if self.minecraft_presence_loop.is_running():
-            self.minecraft_presence_loop.cancel()
         if self.session and not self.session.closed:
             await self.session.close()
         connections = (
@@ -263,33 +265,7 @@ class MovieBot(commands.Bot):
         await super().close()
 
     async def on_ready(self) -> None:
-        if not self.minecraft_presence_loop.is_running():
-            self.minecraft_presence_loop.start()
         logger.debug("Logged in as %s (ID: %s)", self.user, self.user.id if self.user else "unknown")
-
-    @tasks.loop(seconds=60)
-    async def minecraft_presence_loop(self) -> None:
-        try:
-            status = await self._mc_server.async_status()
-            online = status.players.online
-            max_players = status.players.max
-            activity = discord.Game(name=f"Онлайн: {online}/{max_players}")
-        except Exception as exc:
-            message = str(exc) or exc.__class__.__name__
-            if message != self._last_mc_status_error:
-                logger.warning("Failed to fetch Minecraft server status: %s", message)
-                logger.debug("Minecraft server status traceback", exc_info=True)
-                self._last_mc_status_error = message
-            activity = discord.Game(name="Онлайн: offline")
-        try:
-            await self.change_presence(status=discord.Status.online, activity=activity)
-        except Exception as exc:
-            logger.warning("Failed to update Minecraft presence: %s", exc)
-            logger.debug("Minecraft presence traceback", exc_info=True)
-
-    @minecraft_presence_loop.before_loop
-    async def before_minecraft_presence_loop(self) -> None:
-        await self.wait_until_ready()
 
     async def send_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> bool:
         if not self.settings.mod_log_channel_id:

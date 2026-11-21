@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from services.social_game_service import utcnow_iso
 from services.community_ops_service import normalize_user_text
 from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_avatar_bytes, resolve_display_name
@@ -54,7 +55,7 @@ class ClubRenameModal(discord.ui.Modal, title="Переименовать клу
         await self.cog.refresh_menu(interaction)
 
 
-class ClubMenuView(discord.ui.View):
+class ClubMenuView(ActivityView):
     def __init__(self, cog: "ClubCog", owner_id: int, *, has_club: bool) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -135,7 +136,7 @@ class ClubMenuView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=ClubBackView(self.cog, self.owner_id))
 
 
-class ClubBackView(discord.ui.View):
+class ClubBackView(ActivityView):
     def __init__(self, cog: "ClubCog", owner_id: int) -> None:
         super().__init__(timeout=300)
         self.cog = cog

@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from services.jail_service import JailRecord
 from utils.helpers import format_dt, parse_duration, truncate_text
 from utils.permissions import can_ban, can_kick, can_moderate
@@ -81,7 +82,7 @@ class JailAppealModal(discord.ui.Modal, title="Апелляция"):
         await self.cog.handle_jail_appeal(interaction, str(self.appeal_text))
 
 
-class JailView(discord.ui.View):
+class JailView(ActivityView):
     def __init__(self, cog: "ModerationCog") -> None:
         super().__init__(timeout=None)
         self.cog = cog

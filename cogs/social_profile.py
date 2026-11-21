@@ -12,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from services.social_game_service import utcnow_iso
 from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, resolve_display_name
 from utils.message_commands import is_reputation_command
@@ -86,7 +87,7 @@ class CloneAskModal(discord.ui.Modal, title="Цифровой двойник"):
         await self.cog.answer_clone(interaction, str(self.question.value))
 
 
-class ProfileMenuView(discord.ui.View):
+class ProfileMenuView(ActivityView):
     def __init__(self, cog: "SocialProfileCog", owner_id: int) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -124,7 +125,7 @@ class ProfileMenuView(discord.ui.View):
         await interaction.response.edit_message(embed=self.cog.privacy_embed(), view=ProfileBackView(self.cog, self.owner_id))
 
 
-class ProfileBackView(discord.ui.View):
+class ProfileBackView(ActivityView):
     def __init__(self, cog: "SocialProfileCog", owner_id: int) -> None:
         super().__init__(timeout=300)
         self.cog = cog
@@ -141,7 +142,7 @@ class ProfileBackView(discord.ui.View):
         await self.cog.refresh_profile_menu(interaction)
 
 
-class ProfileDeleteConfirmView(discord.ui.View):
+class ProfileDeleteConfirmView(ActivityView):
     def __init__(self, cog: "SocialProfileCog", owner_id: int) -> None:
         super().__init__(timeout=120)
         self.cog = cog
@@ -378,7 +379,8 @@ class SocialProfileCog(commands.Cog):
                 "Бот хранит агрегаты: количество сообщений, среднюю длину, эмодзи, вопросы, частотные слова, активные каналы и связи/ответы/упоминания. "
                 "Samples ограничены 100 короткими очищенными фразами на пользователя и сохраняются только если включён store_message_samples. "
                 "Вложения, файлы, DM и сообщения ботов не анализируются. "
-                "В админской статистике команд видны участник, команда и число вызовов по дням за последние 90 дней. "
+                "В админской статистике за последние 90 дней видны команды и счётчики действий участника по модулям: "
+                "кнопки и меню, реакции и изменения репутации. "
                 "/forget_me удаляет данные профиля и эти счётчики и отключает их дальнейший сбор."
             ),
             color=discord.Color.blurple(),

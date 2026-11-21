@@ -17,6 +17,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from cogs.music_resolvers import (
     ResolverUserError,
     is_external_music_query,
@@ -184,7 +185,7 @@ class MusicAddTrackModal(discord.ui.Modal, title="Добавить музыку"
         )
 
 
-class MusicControlView(discord.ui.View):
+class MusicControlView(ActivityView):
     def __init__(self, cog: MusicCog) -> None:
         super().__init__(timeout=None)
         self.cog = cog

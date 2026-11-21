@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from utils.tts_text_filter import filter_tts_text, format_removed_words
 from utils.voice_runtime import FFMPEG_MISSING_MESSAGE, find_ffmpeg, require_ffmpeg
 
@@ -170,7 +171,7 @@ class TTSVoiceSelect(discord.ui.Select):
         await self.cog.handle_voice_select(interaction, self.values[0])
 
 
-class TTSVoiceView(discord.ui.View):
+class TTSVoiceView(ActivityView):
     def __init__(self, cog: "TTSVoiceCog", session: TTSSession | None, *, disabled: bool = False) -> None:
         super().__init__(timeout=None)
         self.add_item(TTSVoiceSelect(cog, session, disabled=disabled))

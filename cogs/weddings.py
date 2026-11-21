@@ -14,6 +14,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
+from utils.module_activity import ActivityView
 from utils.leaderboard_image import LeaderboardImageRow, make_leaderboard_file, make_profile_file, resolve_avatar_bytes, resolve_display_name
 
 logger = logging.getLogger(__name__)
@@ -287,7 +288,7 @@ async def init_weddings_db(db_path: Path = WEDDINGS_DB_PATH) -> aiosqlite.Connec
     return db
 
 
-class ProposalView(discord.ui.View):
+class ProposalView(ActivityView):
     def __init__(
         self,
         cog: WeddingsCog,
@@ -369,7 +370,7 @@ class ProposalView(discord.ui.View):
         await interaction.response.edit_message(content=None, embed=embed, view=self)
 
 
-class RelationshipMenuView(discord.ui.View):
+class RelationshipMenuView(ActivityView):
     def __init__(self, cog: WeddingsCog, owner_id: int, guild_id: int, marriage_id: int) -> None:
         super().__init__(timeout=300)
         self.cog = cog

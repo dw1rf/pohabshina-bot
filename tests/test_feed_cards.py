@@ -23,16 +23,27 @@ def test_starboard_publishes_public_card_and_skips_restricted_source():
             ))
             target.send = AsyncMock(return_value=SimpleNamespace(id=5))
             guild = SimpleNamespace(get_channel={2: source, 3: target}.get, default_role=Mock())
-            bot = SimpleNamespace(db=db, get_guild=lambda _: guild, progression_db=db,
+            bot = SimpleNamespace(db=db, get_guild=lambda _: guild, progression_db=db, dispatch=Mock(),
                                   progression=SimpleNamespace(record_event=AsyncMock()))
             cog = StarboardCog(bot)
             await cog.cog_load()
             await db.execute("INSERT INTO starboard_settings(guild_id,channel_id) VALUES (1,3)")
             await db.commit()
-            await cog._refresh(1, 2, 4)
+            voter = SimpleNamespace(id=7, bot=False)
+            payload = SimpleNamespace(guild_id=1, channel_id=2, message_id=4, emoji="⭐", member=voter)
+            await cog.on_raw_reaction_add(payload)
             assert target.send.await_args.kwargs["embed"].to_dict()["color"] == BRAND_COLOR
+            source.fetch_message.return_value.reactions[0].count = 1
+            payload.message_id = 5
+            await cog.on_raw_reaction_add(payload)
+            await cog.on_raw_reaction_remove(payload)
+            voter.bot = True
+            await cog.on_raw_reaction_add(payload)
+            voter.bot = False
             source.overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False)}
-            await cog._refresh(1, 2, 6)
+            await cog.on_raw_reaction_add(payload)
             target.send.assert_awaited_once()
+            assert bot.dispatch.call_count == 2
+            bot.dispatch.assert_called_with("module_activity", 1, 7, "starboard", "reaction")
 
     asyncio.run(scenario())
