@@ -267,6 +267,17 @@ class MovieBot(commands.Bot):
     async def on_ready(self) -> None:
         logger.debug("Logged in as %s (ID: %s)", self.user, self.user.id if self.user else "unknown")
 
+    async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        if self.user is None or member.id != self.user.id or after.channel is None or after.self_deaf:
+            return
+        # discord.py can clear self_deaf when moving or rejoining a channel.
+        current = member.voice
+        if current is not None and current.channel == after.channel and not current.self_deaf:
+            try:
+                await member.guild.change_voice_state(channel=current.channel, self_deaf=True, self_mute=current.self_mute)
+            except (discord.HTTPException, discord.ConnectionClosed):
+                logger.warning("Could not restore self-deafen in guild %s", member.guild.id, exc_info=True)
+
     async def send_mod_log(self, guild: discord.Guild, action: str, description: str, color: discord.Color) -> bool:
         if not self.settings.mod_log_channel_id:
             return False

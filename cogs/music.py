@@ -9,15 +9,17 @@ import re
 import shlex
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from bot_client import MovieBot
+from utils.brand import BRAND_COLOR
 from utils.module_activity import ActivityView
 from cogs.music_resolvers import (
     ResolverUserError,
@@ -167,7 +169,7 @@ class MusicPlayer:
 
 class MusicAddTrackModal(discord.ui.Modal, title="Добавить музыку"):
     query = discord.ui.TextInput(
-        label="YouTube ссылка или название",
+        label="Название трека или ссылка",
         placeholder="https://youtube.com/watch?v=... или название трека",
         max_length=2000,
     )
@@ -190,38 +192,45 @@ class MusicAddTrackModal(discord.ui.Modal, title="Добавить музыку"
 
 
 class MusicControlView(ActivityView):
-    def __init__(self, cog: MusicCog) -> None:
+    # Keep the original custom IDs routable on panels published before the redesign.
+    menu_actions = {
+        "queue": "Посмотреть очередь",
+        "next": "Поставить следующим",
+        "shuffle": "Переключить перемешивание",
+        "autoplay": "Переключить автоплей",
+        "current": "Подробнее о треке",
+        "refresh": "Обновить пульт",
+        "clear": "Очистить очередь",
+        "stop": "Остановить и очистить очередь",
+        "leave": "Отключить бота от канала",
+    }
+
+    def __init__(self, cog: MusicCog, player: MusicPlayer | None = None, *, register_legacy: bool = False) -> None:
         super().__init__(timeout=None)
         self.cog = cog
-        button_config: dict[str, tuple[str, str, discord.ButtonStyle, int]] = {
-            "music_panel:pause_resume": ("Пауза", "⏯️", discord.ButtonStyle.secondary, 0),
-            "music_panel:skip": ("Пропуск", "⏭️", discord.ButtonStyle.secondary, 0),
-            "music_panel:stop": ("Стоп", "⏹️", discord.ButtonStyle.danger, 0),
-            "music_panel:leave": ("Выйти", "👋", discord.ButtonStyle.danger, 0),
-            "music_panel:add": ("Добавить", "➕", discord.ButtonStyle.primary, 1),
-            "music_panel:next": ("Следующим", "⏫", discord.ButtonStyle.secondary, 1),
-            "music_panel:queue": ("Очередь", "📜", discord.ButtonStyle.secondary, 1),
-            "music_panel:shuffle": ("Микс", "🔀", discord.ButtonStyle.secondary, 1),
-            "music_panel:current": ("Сейчас", "ℹ️", discord.ButtonStyle.secondary, 2),
-            "music_panel:autoplay": ("Авто", "🔁", discord.ButtonStyle.secondary, 2),
-            "music_panel:refresh": ("Обновить", "🔄", discord.ButtonStyle.secondary, 2),
-        }
-        for item in self.children:
-            if isinstance(item, discord.ui.Button) and item.custom_id in button_config:
-                label, emoji, style, row = button_config[item.custom_id]
-                item.label = label
-                item.emoji = emoji
-                item.style = style
-                item.row = row
-        for item in list(self.children):
-            if isinstance(item, discord.ui.Button) and item.custom_id == "music_panel:refresh":
-                self.remove_item(item)
-        clear_button = discord.ui.Button(label="Очистить", emoji="🧹", style=discord.ButtonStyle.secondary, custom_id="music_panel:clear", row=1)
-        clear_button.callback = self.clear_button_callback
-        self.add_item(clear_button)
+        paused = player is not None and player.is_paused
+        for action, label, emoji in (
+            ("add", "Добавить", None),
+            ("pause_resume", "Продолжить" if paused else "Пауза", "▶️" if paused else "⏸️"),
+            ("skip", "Пропустить", "⏭️"),
+        ):
+            button = discord.ui.Button(
+                label=label, emoji=emoji, row=0, custom_id=f"music_panel:{action}",
+                style=discord.ButtonStyle.primary if action == "add" else discord.ButtonStyle.secondary,
+                disabled=player is not None and player.current is None and action in {"pause_resume", "skip"},
+            )
+            button.callback = partial(self._control, action)
+            self.add_item(button)
+        if register_legacy:
+            for index, (action, label) in enumerate(self.menu_actions.items()):
+                button = discord.ui.Button(label=label, custom_id=f"music_panel:{action}", row=2 + index // 5)
+                button.callback = partial(self._control, action)
+                self.add_item(button)
 
-    async def clear_button_callback(self, interaction: discord.Interaction) -> None:
-        await self._run_action(interaction, lambda send_error: self.cog.handle_clear(interaction.guild, interaction.user, send_error=send_error))
+    @discord.ui.select(custom_id="music_panel:menu", placeholder="Очередь и управление", row=1,
+                       options=[discord.SelectOption(label=label, value=value) for value, label in menu_actions.items()])
+    async def menu(self, interaction: discord.Interaction, select: discord.ui.Select) -> None:
+        await self._control(select.values[0], interaction)
 
     async def _safe_defer(self, interaction: discord.Interaction, *, ephemeral: bool = True) -> bool:
         try:
@@ -262,7 +271,7 @@ class MusicControlView(ActivityView):
         if interaction.guild is None or interaction.message is None:
             return
         try:
-            await interaction.message.edit(embed=self.cog.build_panel_embed(interaction.guild), view=self)
+            await self.cog.update_panel(interaction.guild, interaction.message)
         except discord.HTTPException:
             logger.exception("Failed to refresh music panel: guild=%s", interaction.guild.id)
 
@@ -283,78 +292,36 @@ class MusicControlView(ActivityView):
         except discord.NotFound:
             logger.debug("Music panel followup expired: guild=%s", interaction.guild_id)
 
-    @discord.ui.button(label="Добавить", style=discord.ButtonStyle.primary, custom_id="music_panel:add", row=0)
-    async def add_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await self._safe_send_modal(interaction, MusicAddTrackModal(self.cog, mode="end"))
-
-    @discord.ui.button(label="Следующим", style=discord.ButtonStyle.secondary, custom_id="music_panel:next", row=0)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await self._safe_send_modal(interaction, MusicAddTrackModal(self.cog, mode="next"))
-
-    @discord.ui.button(label="Пауза/Продолжить", style=discord.ButtonStyle.secondary, custom_id="music_panel:pause_resume", row=0)
-    async def pause_resume_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        async def action(send_error: Any) -> str:
-            voice_client = interaction.guild.voice_client if interaction.guild is not None else None
-            if isinstance(voice_client, discord.VoiceClient) and voice_client.is_paused():
-                return await self.cog.handle_resume(interaction.guild, interaction.user, send_error=send_error)
-            return await self.cog.handle_pause(interaction.guild, interaction.user, send_error=send_error)
-
-        await self._run_action(interaction, action)
-
-    @discord.ui.button(label="Скип", style=discord.ButtonStyle.secondary, custom_id="music_panel:skip", row=0)
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await self._run_action(interaction, lambda send_error: self.cog.handle_skip(interaction.guild, interaction.user, send_error=send_error))
-
-    @discord.ui.button(label="Стоп", style=discord.ButtonStyle.danger, custom_id="music_panel:stop", row=0)
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await self._run_action(interaction, lambda send_error: self.cog.handle_stop(interaction.guild, interaction.user, send_error=send_error))
-
-    @discord.ui.button(label="Сейчас", style=discord.ButtonStyle.secondary, custom_id="music_panel:current", row=1)
-    async def current_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        if interaction.guild is None:
+    async def _control(self, action: str, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        if guild is None:
             await self._send_ephemeral(interaction, "Команда доступна только на сервере.")
             return
-        await self._send_ephemeral(interaction, embed=self.cog.build_current_embed(self.cog.get_player(interaction.guild.id)))
-
-    @discord.ui.button(label="Очередь", style=discord.ButtonStyle.secondary, custom_id="music_panel:queue", row=1)
-    async def queue_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        if interaction.guild is None:
-            await self._send_ephemeral(interaction, "Команда доступна только на сервере.")
+        if guild.id not in self.cog.panels and interaction.message is not None:
+            self.cog.watch_panel(guild.id, interaction.message.channel.get_partial_message(interaction.message.id))
+        if action in {"add", "next"}:
+            await self._safe_send_modal(interaction, MusicAddTrackModal(self.cog, mode="end" if action == "add" else "next"))
             return
-        await self._send_ephemeral(interaction, embed=self.cog.build_queue_embed(self.cog.get_player(interaction.guild.id), page=1))
-
-    @discord.ui.button(label="Shuffle", style=discord.ButtonStyle.secondary, custom_id="music_panel:shuffle", row=1)
-    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        async def action(send_error: Any) -> str:
-            if interaction.guild is None:
-                await send_error("Команда доступна только на сервере.")
-                return ""
-            player = self.cog.get_player(interaction.guild.id)
-            return await self.cog.handle_shuffle(interaction.guild, interaction.user, not player.shuffle_enabled, send_error=send_error)
-
-        await self._run_action(interaction, action)
-
-    @discord.ui.button(label="Autoplay", style=discord.ButtonStyle.secondary, custom_id="music_panel:autoplay", row=1)
-    async def autoplay_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        async def action(send_error: Any) -> str:
-            if interaction.guild is None:
-                await send_error("Команда доступна только на сервере.")
-                return ""
-            player = self.cog.get_player(interaction.guild.id)
-            return await self.cog.handle_autoplay(interaction.guild, interaction.user, not player.autoplay_enabled, send_error=send_error)
-
-        await self._run_action(interaction, action)
-
-    @discord.ui.button(label="Обновить", style=discord.ButtonStyle.secondary, custom_id="music_panel:refresh", row=1)
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        if not await self._safe_defer(interaction, ephemeral=True):
+        player = self.cog.get_player(guild.id)
+        if action in {"current", "queue"}:
+            embed = self.cog.build_current_embed(player) if action == "current" else self.cog.build_queue_embed(player, page=1)
+            await self._send_ephemeral(interaction, embed=embed)
             return
-        await self._refresh_panel_message(interaction)
-        await interaction.followup.send("Панель обновлена.", ephemeral=True)
-
-    @discord.ui.button(label="Выйти", style=discord.ButtonStyle.danger, custom_id="music_panel:leave", row=2)
-    async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button[MusicControlView]) -> None:
-        await self._run_action(interaction, lambda send_error: self.cog.handle_leave(interaction.guild, interaction.user, send_error=send_error))
+        if action == "refresh":
+            if await self._safe_defer(interaction):
+                await self._refresh_panel_message(interaction)
+            return
+        if action in {"shuffle", "autoplay"}:
+            handler = self.cog.handle_shuffle if action == "shuffle" else self.cog.handle_autoplay
+            enabled = player.shuffle_enabled if action == "shuffle" else player.autoplay_enabled
+            await self._run_action(interaction, lambda send_error: handler(guild, interaction.user, not enabled, send_error=send_error))
+            return
+        handlers = {
+            "pause_resume": self.cog.handle_resume if player.is_paused else self.cog.handle_pause,
+            "skip": self.cog.handle_skip, "stop": self.cog.handle_stop,
+            "leave": self.cog.handle_leave, "clear": self.cog.handle_clear,
+        }
+        await self._run_action(interaction, lambda send_error: handlers[action](guild, interaction.user, send_error=send_error))
 
 
 def _short(text: str | None, limit: int) -> str:
@@ -501,7 +468,9 @@ class MusicCog(commands.Cog):
         self._ffmpeg_executable: str | None = None
         self._ffmpeg_logged = False
         _validate_ytdl_cookie_file()
-        self.bot.add_view(MusicControlView(self))
+        self.panels: dict[int, tuple[discord.PartialMessage, dict[str, Any]]] = {}
+        self.panel_edit_lock = asyncio.Lock()
+        self.bot.add_view(MusicControlView(self, register_legacy=True))
         ffmpeg_path = self.ffmpeg_executable()
         if ffmpeg_path:
             logger.debug("Music cog found FFmpeg: %s", ffmpeg_path)
@@ -510,6 +479,8 @@ class MusicCog(commands.Cog):
             logger.error("%s Music playback commands will return a clear user error.", FFMPEG_MISSING_MESSAGE)
 
     def cog_unload(self) -> None:
+        self.refresh_panels.cancel()
+        self.panels.clear()
         for guild_id in list(self.players):
             self.bot.loop.create_task(self.shutdown_player(guild_id, disconnect=True))
 
@@ -634,7 +605,7 @@ class MusicCog(commands.Cog):
 
         try:
             logger.info("Music connecting: guild=%s channel=%s", guild.id, channel.id)
-            connected = await channel.connect(timeout=15, reconnect=True)
+            connected = await channel.connect(timeout=15, reconnect=True, self_deaf=True)
         except (TimeoutError, discord.Forbidden, discord.ClientException, discord.HTTPException):
             logger.exception("Music voice connection failed: guild=%s channel=%s", guild.id, channel.id)
             await send_error("Не удалось подключиться к голосовому каналу.")
@@ -1045,37 +1016,66 @@ class MusicCog(commands.Cog):
     def build_panel_embed(self, guild: discord.Guild) -> discord.Embed:
         player = self.get_player(guild.id)
         track = player.current
-        if track is None:
-            current = "Сейчас ничего не играет."
-            source = "Ожидание"
-            requester = "-"
-            duration = "-"
-            status = "ожидание"
+        embed = discord.Embed(color=BRAND_COLOR)
+        status = "На паузе" if player.is_paused else "Сейчас играет"
+        embed.set_author(name=f"Музыка · {status}" if track else "Музыка")
+        if track:
+            embed.title = _short(track.title, 150)
+            if _is_http_url(track.webpage_url) and len(track.webpage_url) <= 2048:
+                embed.url = track.webpage_url
+            details = [track.artist, _format_duration(track.duration) if track.duration else None,
+                       "YouTube" if track.source == "search" else _source_label(track.source)]
+            embed.description = " · ".join(discord.utils.escape_markdown(_short(value, 80)) for value in details if value)
+            if track.thumbnail and _is_http_url(track.thumbnail) and len(track.thumbnail) <= 2048:
+                embed.set_thumbnail(url=track.thumbnail)
         else:
-            status = "пауза" if player.is_paused else "играет"
-            current = f"[{_short(track.title, 120)}]({track.webpage_url})"
-            source = _source_label(track.source)
-            requester = _short(track.requester_name, 80)
-            duration = _format_duration(track.duration)
-        voice_client = guild.voice_client
-        voice_status = "подключён" if isinstance(voice_client, discord.VoiceClient) and voice_client.is_connected() else "не подключён"
-        embed = discord.Embed(
-            title="🎵 Музыкальная панель",
-            description="Публичная панель управления текущей музыкой.",
-            color=discord.Color.blurple(),
-        )
-        embed.add_field(name="Текущий трек", value=current, inline=False)
-        embed.add_field(name="Статус", value=status, inline=True)
-        embed.add_field(name="Источник", value=source, inline=True)
-        embed.add_field(name="Добавил", value=requester, inline=True)
-        embed.add_field(name="Длительность", value=duration, inline=True)
-        embed.add_field(name="Очередь", value=f"{len(player.queue)} треков", inline=True)
-        embed.add_field(name="Голос", value=voice_status, inline=True)
-        embed.add_field(name="Shuffle", value="включён" if player.shuffle_enabled else "выключен", inline=True)
-        embed.add_field(name="Авто", value="включено" if player.autoplay_enabled else "выключено", inline=True)
-        if track and track.thumbnail:
-            embed.set_thumbnail(url=track.thumbnail)
+            embed.title = "Что включим?"
+            embed.description = "Нажми «Добавить» и введи название трека или ссылку."
+        if player.queue:
+            titles = [discord.utils.escape_markdown(_short(item.title, 65)) for item in player.queue[:2]]
+            embed.add_field(name=f"В очереди · {len(player.queue)}", value="\n".join(titles), inline=False)
+        footer = []
+        if track:
+            footer.append(f"Добавил: {_short(track.requester_name, 50)}")
+        if player.shuffle_enabled:
+            footer.append("Перемешивание вкл.")
+        if player.autoplay_enabled:
+            footer.append("Автоплей вкл.")
+        if footer:
+            embed.set_footer(text=" · ".join(footer))
         return embed
+
+    def watch_panel(self, guild_id: int, message: discord.PartialMessage, embed: discord.Embed | None = None) -> None:
+        self.panels[guild_id] = (message, embed.to_dict() if embed else {})
+        if not self.refresh_panels.is_running():
+            self.refresh_panels.start()
+
+    async def update_panel(self, guild: discord.Guild, message: discord.PartialMessage, *, force: bool = True) -> None:
+        async with self.panel_edit_lock:
+            entry = self.panels.get(guild.id)
+            embed = self.build_panel_embed(guild)
+            if not force and (not entry or entry[0].id != message.id or entry[1] == embed.to_dict()):
+                return
+            await message.edit(embed=embed, view=MusicControlView(self, self.get_player(guild.id)))
+            if self.panels.get(guild.id) is entry:
+                # Use the bot token even after the slash interaction token expires.
+                self.watch_panel(guild.id, message.channel.get_partial_message(message.id), embed)
+
+    @tasks.loop(seconds=8)
+    async def refresh_panels(self) -> None:
+        for guild_id, entry in list(self.panels.items()):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                self.panels.pop(guild_id, None)
+                continue
+            try:
+                await self.update_panel(guild, entry[0], force=False)
+            except (discord.NotFound, discord.Forbidden):
+                if self.panels.get(guild_id) is entry:
+                    self.panels.pop(guild_id)
+            except discord.HTTPException:
+                logger.warning("Failed to update music panel: guild=%s", guild_id, exc_info=True)
+
     async def handle_add(
         self,
         guild: discord.Guild | None,
@@ -1250,7 +1250,12 @@ class MusicCog(commands.Cog):
         if interaction.guild is None:
             await interaction.response.send_message("Команда доступна только на сервере.", ephemeral=True)
             return
-        await interaction.response.send_message(embed=self.build_panel_embed(interaction.guild), view=MusicControlView(self))
+        embed = self.build_panel_embed(interaction.guild)
+        response = await interaction.response.send_message(embed=embed, view=MusicControlView(self, self.get_player(interaction.guild.id)))
+        message = response.resource
+        if not isinstance(message, discord.InteractionMessage):
+            message = await interaction.original_response()
+        self.watch_panel(interaction.guild.id, message.channel.get_partial_message(message.id), embed)
 
     @music_group.command(name="play", description="Добавить YouTube-ссылку или найденный по названию трек в очередь")
     @app_commands.describe(query="YouTube URL, YouTube playlist или название трека")

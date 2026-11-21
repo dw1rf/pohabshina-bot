@@ -323,7 +323,7 @@ class TTSVoiceCog(commands.Cog):
             return voice_client
 
         try:
-            return await channel.connect(timeout=15, reconnect=True)
+            return await channel.connect(timeout=15, reconnect=True, self_deaf=True)
         except (TimeoutError, discord.ClientException, discord.HTTPException):
             logger.exception("Failed to connect to voice channel: guild=%s channel=%s", interaction.guild.id, channel.id)
             await self.send_interaction_message(interaction, "Не удалось подключиться к голосовому каналу.", ephemeral=True)
