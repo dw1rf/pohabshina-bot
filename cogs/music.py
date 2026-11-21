@@ -7,6 +7,7 @@ import os
 import random
 import re
 import shlex
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ FFMPEG_OPTIONS = "-vn"
 MAX_QUEUE_PAGE_VALUE = 950
 MAX_PLAYLIST_TRACKS = int(os.getenv("MUSIC_MAX_PLAYLIST_TRACKS", "50") or "50")
 YTDL_EXTRACT_TIMEOUT_SECONDS = int(os.getenv("MUSIC_EXTRACT_TIMEOUT_SECONDS", "60") or "60")
+STREAM_REUSE_SECONDS = 60
 URL_PREFIXES = ("http://", "https://")
 
 YTDL_BASE_OPTIONS: dict[str, Any] = {
@@ -145,6 +147,8 @@ class Track:
     original_url: str | None = None
     thumbnail: str | None = None
     http_headers: dict[str, str] = field(default_factory=dict)
+    resolved_at: float | None = None
+    search_query: str | None = None
 
 
 @dataclass(slots=True)
@@ -157,7 +161,7 @@ class MusicPlayer:
     is_paused: bool = False
     shuffle_enabled: bool = False
     autoplay_enabled: bool = False
-    audio_player_task: asyncio.Task[None] | None = None
+    request_epoch: int = 0
     stopped: bool = False
 
 
@@ -432,11 +436,14 @@ def _track_from_info(
     thumbnail: str | None = None,
 ) -> Track | None:
     title = info.get("title") or "Без названия"
+    flat = info.get("_type") in ("url", "url_transparent")
     webpage_url = info.get("webpage_url") or info.get("original_url")
+    if flat and _is_http_url(str(info.get("url", ""))):
+        webpage_url = info["url"]
     if not webpage_url and info.get("id"):
         webpage_url = f"https://www.youtube.com/watch?v={info['id']}"
-    stream_url = info.get("url")
-    if not webpage_url or not stream_url:
+    stream_url = "" if flat else info.get("url")
+    if not webpage_url or (not flat and not stream_url):
         return None
     requester_name = getattr(requester, "display_name", None) or getattr(requester, "name", None) or "Пользователь"
     raw_headers = info.get("http_headers")
@@ -457,6 +464,7 @@ def _track_from_info(
         original_url=original_url or webpage_url,
         thumbnail=thumbnail or info.get("thumbnail"),
         http_headers=http_headers,
+        resolved_at=None if flat else time.monotonic(),
     )
 
 
@@ -692,6 +700,9 @@ class MusicCog(commands.Cog):
         options = _ytdl_options(
             noplaylist=not effective_allow_playlist,
             playlistend=MAX_PLAYLIST_TRACKS,
+            extract_flat="in_playlist" if effective_allow_playlist and _host_matches(
+                urlparse(ytdl_query).hostname or "", "youtube.com", "youtu.be", "youtube-nocookie.com"
+            ) else False,
         )
         logger.debug(
             "yt-dlp extract: query=%s playlist=%s cookies=%s",
@@ -719,7 +730,7 @@ class MusicCog(commands.Cog):
         entries = data.get("entries")
         playlist_detected = bool(entries) and is_url and not youtube_radio_as_single
         raw_items: list[dict[str, Any]] = []
-        if entries:
+        if entries is not None:
             raw_items.extend(entry for entry in entries if isinstance(entry, dict))
         else:
             raw_items.append(data)
@@ -740,79 +751,45 @@ class MusicCog(commands.Cog):
             asyncio.to_thread(resolve_external_music_query, query, max_tracks=MAX_PLAYLIST_TRACKS),
             timeout=YTDL_EXTRACT_TIMEOUT_SECONDS,
         )
-        options = _ytdl_options(noplaylist=True)
-        tracks: list[Track] = []
-        skipped = resolved.skipped
-
-        for resolved_track in resolved.tracks[:MAX_PLAYLIST_TRACKS]:
-            ytdl_query = f"ytsearch1:{resolved_track.search_query}"
-
-            def extract() -> dict[str, Any] | None:
-                with yt_dlp.YoutubeDL(options) as ytdl:
-                    return ytdl.extract_info(ytdl_query, download=False)
-
-            try:
-                data = await asyncio.wait_for(asyncio.to_thread(extract), timeout=YTDL_EXTRACT_TIMEOUT_SECONDS)
-            except Exception:
-                skipped += 1
-                logger.warning(
-                    "External track lookup failed: source=%s query=%s",
-                    resolved_track.source,
-                    resolved_track.search_query,
-                    exc_info=True,
-                )
-                continue
-
-            entries = data.get("entries") if isinstance(data, dict) else None
-            item = next((entry for entry in entries if isinstance(entry, dict)), None) if entries else data
-            if not isinstance(item, dict):
-                skipped += 1
-                continue
-
-            track = _track_from_info(
-                item,
-                requester,
-                source=resolved_track.source,
-                original_url=resolved_track.original_url,
-                artist=resolved_track.artist,
-                thumbnail=resolved_track.thumbnail,
+        # Queue the provider's metadata immediately. Resolve each song on
+        # YouTube when it reaches the head of the queue.
+        tracks = [
+            Track(
+                title=item.title, artist=item.artist, duration=item.duration,
+                source=item.source, original_url=item.original_url, webpage_url=item.original_url,
+                thumbnail=item.thumbnail, stream_url="", search_query=item.search_query,
+                requester_id=requester.id, requester_name=requester.display_name,
             )
-            if track is None:
-                skipped += 1
-                continue
-            track.title = resolved_track.title
-            if resolved_track.duration and not track.duration:
-                track.duration = resolved_track.duration
-            tracks.append(track)
-
-        if skipped:
-            logger.info(
-                "External music resolved with skipped tracks: source=%s added=%s skipped=%s limit=%s",
-                resolved.source,
-                len(tracks),
-                skipped,
-                resolved.limit,
-            )
+            for item in resolved.tracks[:MAX_PLAYLIST_TRACKS]
+        ]
         return tracks, resolved.playlist_detected
 
     async def refresh_stream_url(self, track: Track) -> Track:
+        if track.stream_url and track.resolved_at is not None and time.monotonic() - track.resolved_at < STREAM_REUSE_SECONDS:
+            return track
         if yt_dlp is None:
             raise RuntimeError("yt-dlp is not installed")
         options = _ytdl_options(noplaylist=True)
 
         def extract() -> dict[str, Any] | None:
             with yt_dlp.YoutubeDL(options) as ytdl:
-                return ytdl.extract_info(track.webpage_url, download=False)
+                query = f"ytsearch1:{track.search_query}" if track.search_query else track.webpage_url
+                return ytdl.extract_info(query, download=False)
 
         data = await asyncio.wait_for(asyncio.to_thread(extract), timeout=YTDL_EXTRACT_TIMEOUT_SECONDS)
         if not isinstance(data, dict):
             raise RuntimeError("yt-dlp returned no track info")
+        if "entries" in data:
+            data = next((entry for entry in data["entries"] or () if isinstance(entry, dict)), {})
         refreshed = _track_from_info(
             data,
             discord.Object(id=track.requester_id),  # type: ignore[arg-type]
         )
-        if refreshed is None:
+        if refreshed is None or not refreshed.stream_url:
             raise RuntimeError("yt-dlp returned no playable stream")
+        if track.search_query:
+            refreshed.title = track.title
+            refreshed.duration = refreshed.duration or track.duration
         refreshed.requester_id = track.requester_id
         refreshed.requester_name = track.requester_name
         refreshed.artist = track.artist
@@ -851,13 +828,19 @@ class MusicCog(commands.Cog):
         tracks: list[Track],
         *,
         mode: str,
+        request_epoch: int,
     ) -> tuple[str, Track | None, int]:
-        player = self.get_player(guild.id)
-        player.voice_client = voice_client
+        player = self.players.get(guild.id)
+        if player is None or guild.voice_client is not voice_client:
+            raise MusicUserError("Голосовое подключение изменилось во время поиска. Вызови команду ещё раз.")
         if not tracks:
             raise MusicUserError("Ничего не найдено.")
 
         async with player.lock:
+            if player.request_epoch != request_epoch or player.voice_client is not voice_client or not voice_client.is_connected():
+                raise MusicUserError("Поиск отменён после остановки или смены голосового подключения.")
+            if self._tts_session_active(guild.id):
+                raise MusicUserError("Сейчас активна озвучка TTS.")
             player.stopped = False
             first_track = tracks[0]
             if mode in ("now", "next"):
@@ -930,7 +913,7 @@ class MusicCog(commands.Cog):
                     len(ffmpeg_stderr.getvalue()),
                 )
             self.bot.loop.call_soon_threadsafe(
-                lambda: self.bot.loop.create_task(self.after_track(player.guild_id, error))
+                lambda: self.bot.loop.create_task(self.after_track(player, track))
             )
 
         try:
@@ -941,13 +924,14 @@ class MusicCog(commands.Cog):
             return True
         except Exception:
             logger.exception("FFmpeg playback failed: guild=%s title=%s", player.guild_id, track.title)
+            source.cleanup()
             player.current = None
             return False
 
-    async def after_track(self, guild_id: int, error: Exception | None) -> None:
-        player = self.get_player(guild_id)
+    async def after_track(self, player: MusicPlayer, finished: Track) -> None:
         async with player.lock:
-            finished = player.current
+            if self.players.get(player.guild_id) is not player or player.current is not finished:
+                return
             player.is_paused = False
             if player.stopped:
                 player.current = None
@@ -956,13 +940,13 @@ class MusicCog(commands.Cog):
                 await self.start_next_locked(player)
                 return
             player.current = None
-            if player.autoplay_enabled and finished is not None:
+            if player.autoplay_enabled:
                 added = await self.add_autoplay_track(player, finished)
                 if added:
                     await self.start_next_locked(player)
                 else:
                     player.autoplay_enabled = False
-                    logger.warning("Autoplay disabled after failed lookup: guild=%s", guild_id)
+                    logger.warning("Autoplay disabled after failed lookup: guild=%s", player.guild_id)
 
     async def shutdown_player(self, guild_id: int, *, disconnect: bool) -> None:
         player = self.get_player(guild_id)
@@ -1116,11 +1100,12 @@ class MusicCog(commands.Cog):
         voice_client = await self.ensure_voice(guild, user, send_error=send_error)
         if voice_client is None or guild is None:
             return
+        request_epoch = self.get_player(guild.id).request_epoch
 
         try:
             tracks, playlist_detected = await self.extract_tracks(clean_query, user, allow_playlist=_is_http_url(clean_query))
-        except (ExternalPlaylistNotConfigured, ResolverUserError) as exc:
-            logger.info("External playlist rejected: guild=%s query=%s", guild.id, clean_query)
+        except (MusicUserError, ResolverUserError) as exc:
+            logger.info("Music lookup rejected: guild=%s", guild.id)
             await send_error(str(exc))
             return
         except Exception:
@@ -1131,7 +1116,7 @@ class MusicCog(commands.Cog):
         if playlist_detected:
             logger.info("YouTube playlist extracted: guild=%s count=%s", guild.id, len(tracks))
         try:
-            result, first_track, count = await self.add_tracks(guild, voice_client, tracks, mode=mode)
+            result, first_track, count = await self.add_tracks(guild, voice_client, tracks, mode=mode, request_epoch=request_epoch)
         except MusicUserError as exc:
             await send_error(str(exc))
             return
@@ -1195,6 +1180,7 @@ class MusicCog(commands.Cog):
         if player is None or guild is None:
             return ""
         async with player.lock:
+            player.request_epoch += 1
             player.stopped = True
             player.queue.clear()
             player.current = None
@@ -1516,6 +1502,7 @@ class MusicCog(commands.Cog):
             player = self.players.get(guild_id)
             if player is not None:
                 async with player.lock:
+                    player.request_epoch += 1
                     player.voice_client = None
                     player.queue.clear()
                     player.current = None
