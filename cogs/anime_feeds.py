@@ -167,7 +167,7 @@ class AnimeFeedsCog(commands.Cog):
                     title=title,
                     url=media.get("siteUrl"),
                     description=f"Вышел эпизод **{airing.get('episode', '?')}**.",
-                    color=BRAND_PURPLE,
+                    color=discord.Colour.from_rgb(*BRAND_PURPLE),
                 )
                 cover = (media.get("coverImage") or {}).get("large")
                 if cover:

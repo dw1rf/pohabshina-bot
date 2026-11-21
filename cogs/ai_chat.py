@@ -698,11 +698,11 @@ class AIChatCog(commands.Cog):
             """
             SELECT content_clean
             FROM ai_message_memory
-            WHERE guild_id = ? AND user_id = ?
+            WHERE guild_id = ? AND channel_id = ? AND user_id = ?
             ORDER BY created_at DESC
             LIMIT 8
             """,
-            (guild_id, user_id),
+            (guild_id, channel_id, user_id),
         )
         user_rows = list(reversed(await cursor.fetchall()))
         if user_rows:
@@ -867,15 +867,26 @@ class AIChatCog(commands.Cog):
             return
         days = _parse_period_days(period)
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+        readable = []
+        if isinstance(interaction.user, discord.Member):
+            for channel in interaction.guild.text_channels:
+                permissions = channel.permissions_for(interaction.user)
+                if permissions.view_channel and permissions.read_message_history:
+                    readable.append(channel.id)
+        if not readable:
+            await interaction.response.send_message("Нет доступных каналов с историей.", ephemeral=True)
+            return
+        placeholders = ", ".join("?" for _ in readable)
         cursor = await self.bot.db.execute(
-            """
+            f"""
             SELECT user_id, channel_id, content_clean, created_at
             FROM ai_message_memory
-            WHERE guild_id = ? AND created_at >= ? AND content_clean LIKE ?
+            WHERE guild_id = ? AND channel_id IN ({placeholders})
+              AND created_at >= ? AND content_clean LIKE ?
             ORDER BY created_at DESC
             LIMIT 8
             """,
-            (interaction.guild.id, cutoff, f"%{clean_query}%"),
+            (interaction.guild.id, *readable, cutoff, f"%{clean_query}%"),
         )
         rows = await cursor.fetchall()
         if not rows:

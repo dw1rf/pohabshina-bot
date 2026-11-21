@@ -476,12 +476,14 @@ class SupportShopCog(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             try:
                 fetched = await self.bot.fetch_channel(ticket.channel_id)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            except discord.NotFound:
                 await self.bot.support_tickets.close_ticket(self.bot.db, guild.id, ticket.channel_id, closed_by=0)
                 return None, None
+            except discord.HTTPException:
+                return ticket, None
             channel = fetched if isinstance(fetched, discord.TextChannel) else None
         if not isinstance(channel, discord.TextChannel):
-            return None, None
+            return ticket, None
         return ticket, channel
 
     async def create_or_get_ticket(self, interaction: discord.Interaction, *, announce: bool = True) -> discord.TextChannel | None:
@@ -499,6 +501,9 @@ class SupportShopCog(commands.Cog):
                 return None
 
         existing_ticket, existing_channel = await self._get_open_ticket_channel(guild, user.id)
+        if existing_ticket and existing_channel is None:
+            await self._safe_reply(interaction, "Не удалось проверить открытое обращение. Попробуйте позже.")
+            return None
         if existing_ticket and existing_channel:
             if announce:
                 await self._safe_reply(interaction, f"У вас уже есть открытое обращение: {existing_channel.mention}")
@@ -592,13 +597,17 @@ class SupportShopCog(commands.Cog):
 
         await self._safe_reply(interaction, "Обращение закрывается…")
 
-        await self.bot.support_tickets.close_ticket(self.bot.db, guild.id, channel.id, member.id)
-        await self._log_ticket_close(guild, channel, ticket.user_id, member.id)
-
         try:
             await channel.delete(reason=f"Ticket closed by {member} ({member.id})")
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        except discord.NotFound:
+            pass
+        except discord.HTTPException:
             logger.exception("Failed to delete ticket channel %s", channel.id)
+            await self._safe_reply(interaction, "Канал не удалён. Обращение открыто, можно повторить закрытие.")
+            return
+        closed = await self.bot.support_tickets.close_ticket(self.bot.db, guild.id, channel.id, member.id)
+        if closed:
+            await self._log_ticket_close(guild, channel, ticket.user_id, member.id)
 
     async def _log_ticket_close(self, guild: discord.Guild, channel: discord.TextChannel, ticket_user_id: int, closed_by_id: int) -> None:
         log_channel_id = self.bot.settings.support_log_channel_id

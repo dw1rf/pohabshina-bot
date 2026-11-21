@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot_client import MovieBot
-from utils.brand import BRAND_ACCENT
+from utils.brand import BRAND_COLOR
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,16 @@ class StarboardCog(commands.Cog):
         target_channel = guild.get_channel(int(settings["channel_id"])) if guild else None
         if not isinstance(source_channel, discord.TextChannel) or not isinstance(target_channel, discord.TextChannel):
             return
+        # Republishing text and images must respect the source channel's audience.
+        if source_channel.is_nsfw() and not target_channel.is_nsfw():
+            return
+        public = source_channel.permissions_for(guild.default_role)
+        restricted = not (public.view_channel and public.read_message_history) or any(
+            overwrite.view_channel is False or overwrite.read_message_history is False
+            for overwrite in source_channel.overwrites.values()
+        )
+        if restricted and source_channel.overwrites != target_channel.overwrites:
+            return
         try:
             source = await source_channel.fetch_message(message_id)
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
@@ -183,7 +193,7 @@ class StarboardCog(commands.Cog):
                 )
                 await self.bot.db.commit()
             return
-        embed = discord.Embed(description=source.content[:4000] or "Сообщение без текста", color=BRAND_ACCENT)
+        embed = discord.Embed(description=source.content[:4000] or "Сообщение без текста", color=BRAND_COLOR)
         embed.set_author(name=source.author.display_name, icon_url=source.author.display_avatar.url)
         embed.add_field(name="Источник", value=f"[Перейти к сообщению]({source.jump_url})", inline=False)
         if source.attachments and source.attachments[0].content_type and source.attachments[0].content_type.startswith("image/"):

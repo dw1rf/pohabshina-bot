@@ -3,16 +3,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
+import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot_client import MovieBot
-from utils.brand import BRAND_ACCENT
+from utils.brand import BRAND_COLOR
+from utils.sqlite_writes import sqlite_write_lock
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def giveaway_write(db: aiosqlite.Connection):
+    async with sqlite_write_lock(db):
+        try:
+            yield
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
 
 
 class GiveawayView(discord.ui.View):
@@ -38,6 +52,9 @@ class GiveawayView(discord.ui.View):
             (self.giveaway_id, interaction.guild.id),
         )
         giveaway = await cursor.fetchone()
+        if giveaway is not None and giveaway["status"] == "pending":
+            await interaction.response.send_message("Розыгрыш публикуется. Нажмите кнопку ещё раз чуть позже.", ephemeral=True)
+            return
         if giveaway is None or giveaway["status"] != "active":
             await interaction.response.send_message("Этот розыгрыш уже завершён.", ephemeral=True)
             return
@@ -45,11 +62,11 @@ class GiveawayView(discord.ui.View):
         if required_role_id and isinstance(interaction.user, discord.Member) and interaction.user.get_role(required_role_id) is None:
             await interaction.response.send_message(f"Для участия нужна роль <@&{required_role_id}>.", ephemeral=True)
             return
-        await self.bot.giveaway_db.execute(
-            "INSERT OR IGNORE INTO giveaway_entries(giveaway_id, user_id) VALUES (?, ?)",
-            (self.giveaway_id, interaction.user.id),
-        )
-        await self.bot.giveaway_db.commit()
+        async with giveaway_write(self.bot.giveaway_db):
+            await self.bot.giveaway_db.execute(
+                "INSERT OR IGNORE INTO giveaway_entries(giveaway_id, user_id) VALUES (?, ?)",
+                (self.giveaway_id, interaction.user.id),
+            )
         await interaction.response.send_message("Ты участвуешь в розыгрыше 🎉", ephemeral=True)
 
 
@@ -63,6 +80,7 @@ class GiveawaysCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
         self._finish_lock = asyncio.Lock()
+        self._publish_lock = asyncio.Lock()
 
     async def cog_load(self) -> None:
         if self.bot.giveaway_db is None:
@@ -108,7 +126,7 @@ class GiveawaysCog(commands.Cog):
         self.finish_loop.cancel()
 
     def _embed(self, prize: str, ends_at: datetime, host_id: int, required_role_id: int = 0) -> discord.Embed:
-        embed = discord.Embed(title="🎉 Розыгрыш", description=f"**Приз:** {prize}", color=BRAND_ACCENT)
+        embed = discord.Embed(title="🎉 Розыгрыш", description=f"**Приз:** {prize}", color=BRAND_COLOR)
         embed.add_field(name="Завершение", value=discord.utils.format_dt(ends_at, "R"), inline=False)
         embed.add_field(name="Организатор", value=f"<@{host_id}>")
         if required_role_id:
@@ -130,21 +148,52 @@ class GiveawaysCog(commands.Cog):
             await interaction.response.send_message("Команда доступна только в текстовом канале сервера.", ephemeral=True)
             return
         ends_at = datetime.now(UTC) + timedelta(minutes=int(duration_minutes))
-        cursor = await self.bot.giveaway_db.execute(
-            """INSERT INTO giveaways(guild_id, channel_id, host_id, prize, ends_at, required_role_id, winner_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (interaction.guild.id, interaction.channel.id, interaction.user.id, str(prize), ends_at.isoformat(), required_role.id if required_role else None, int(winners)),
-        )
-        giveaway_id = int(cursor.lastrowid)
-        view = GiveawayView(self.bot, giveaway_id)
-        await interaction.response.send_message(
-            embed=self._embed(str(prize), ends_at, interaction.user.id, required_role.id if required_role else 0),
-            view=view,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-        message = await interaction.original_response()
-        await self.bot.giveaway_db.execute("UPDATE giveaways SET message_id = ? WHERE giveaway_id = ?", (message.id, giveaway_id))
-        await self.bot.giveaway_db.commit()
+        # Reserve a real Discord message so a retry always edits the same post.
+        response = await interaction.response.send_message("Готовлю розыгрыш…")
+        try:
+            message_id = response.message_id or (await interaction.original_response()).id
+            async with giveaway_write(self.bot.giveaway_db):
+                cursor = await self.bot.giveaway_db.execute(
+                    """INSERT INTO giveaways(guild_id, channel_id, message_id, host_id, prize, ends_at, required_role_id, winner_count, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                    (interaction.guild.id, interaction.channel.id, message_id, interaction.user.id, str(prize),
+                     ends_at.isoformat(), required_role.id if required_role else None, int(winners)),
+                )
+        except (aiosqlite.Error, discord.HTTPException):
+            logger.exception("Failed to register giveaway in channel %s", interaction.channel.id)
+            await interaction.edit_original_response(content="Создать розыгрыш не удалось. Попробуйте ещё раз.")
+            return
+        await self._publish(int(cursor.lastrowid), interaction.channel)
+
+    async def _publish(self, giveaway_id: int, channel: discord.TextChannel) -> None:
+        db = self.bot.giveaway_db
+        assert db is not None
+        async with self._publish_lock:
+            cursor = await db.execute("SELECT * FROM giveaways WHERE giveaway_id = ? AND status = 'pending'", (giveaway_id,))
+            row = await cursor.fetchone()
+            if row is None:
+                return
+            ends_at = datetime.fromisoformat(row["ends_at"])
+            message = channel.get_partial_message(row["message_id"])
+            try:
+                if ends_at <= datetime.now(UTC):
+                    await message.edit(content="Розыгрыш отменён: время участия истекло.", embed=None, view=None)
+                    status = "cancelled"
+                else:
+                    await message.edit(
+                        content=None,
+                        embed=self._embed(row["prize"], ends_at, row["host_id"], row["required_role_id"]),
+                        view=GiveawayView(self.bot, giveaway_id),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                    status = "active"
+            except discord.NotFound:
+                status = "cancelled"
+            except discord.HTTPException:
+                logger.warning("Could not publish giveaway %s; publication will retry", giveaway_id)
+                return
+            async with giveaway_write(db):
+                await db.execute("UPDATE giveaways SET status = ? WHERE giveaway_id = ?", (status, giveaway_id))
 
     async def _finish(self, giveaway_id: int, guild_id: int, *, reroll: bool = False) -> list[int]:
         async with self._finish_lock:
@@ -158,7 +207,8 @@ class GiveawaysCog(commands.Cog):
             (giveaway_id, guild_id),
         )
         giveaway = await cursor.fetchone()
-        if giveaway is None or (giveaway["status"] != "active" and not reroll):
+        allowed_statuses = ("active", "ended") if reroll else ("active",)
+        if giveaway is None or giveaway["status"] not in allowed_statuses:
             return []
         cursor = await self.bot.giveaway_db.execute("SELECT user_id FROM giveaway_entries WHERE giveaway_id = ?", (giveaway_id,))
         candidates = [int(row["user_id"]) for row in await cursor.fetchall()]
@@ -171,14 +221,14 @@ class GiveawaysCog(commands.Cog):
             winners.append(winner)
         cursor = await self.bot.giveaway_db.execute("SELECT COALESCE(MAX(draw_number), 0) + 1 AS draw FROM giveaway_winners WHERE giveaway_id = ?", (giveaway_id,))
         draw_number = int((await cursor.fetchone())["draw"])
-        for winner in winners:
-            await self.bot.giveaway_db.execute(
-                "INSERT INTO giveaway_winners(giveaway_id, user_id, draw_number) VALUES (?, ?, ?)",
-                (giveaway_id, winner, draw_number),
-            )
-        if not reroll:
-            await self.bot.giveaway_db.execute("UPDATE giveaways SET status = 'ended' WHERE giveaway_id = ?", (giveaway_id,))
-        await self.bot.giveaway_db.commit()
+        async with giveaway_write(self.bot.giveaway_db):
+            for winner in winners:
+                await self.bot.giveaway_db.execute(
+                    "INSERT INTO giveaway_winners(giveaway_id, user_id, draw_number) VALUES (?, ?, ?)",
+                    (giveaway_id, winner, draw_number),
+                )
+            if not reroll:
+                await self.bot.giveaway_db.execute("UPDATE giveaways SET status = 'ended' WHERE giveaway_id = ?", (giveaway_id,))
         guild = self.bot.get_guild(int(giveaway["guild_id"]))
         channel = guild.get_channel(int(giveaway["channel_id"])) if guild else None
         if isinstance(channel, discord.TextChannel):
@@ -220,6 +270,11 @@ class GiveawaysCog(commands.Cog):
     async def finish_loop(self) -> None:
         if self.bot.giveaway_db is None:
             return
+        cursor = await self.bot.giveaway_db.execute("SELECT giveaway_id, channel_id FROM giveaways WHERE status = 'pending'")
+        for row in await cursor.fetchall():
+            channel = self.bot.get_channel(row["channel_id"])
+            if isinstance(channel, discord.TextChannel):
+                await self._publish(row["giveaway_id"], channel)
         cursor = await self.bot.giveaway_db.execute(
             "SELECT giveaway_id, guild_id FROM giveaways WHERE status = 'active' AND ends_at <= ?", (datetime.now(UTC).isoformat(),)
         )

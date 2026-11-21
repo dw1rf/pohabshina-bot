@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -7,17 +11,35 @@ from discord.ext import commands
 from bot_client import MovieBot
 from utils.helpers import truncate_text
 
+logger = logging.getLogger(__name__)
+
 
 class MoviesCog(commands.Cog):
     def __init__(self, bot: MovieBot) -> None:
         self.bot = bot
+        self._genre_lock = asyncio.Lock()
+
+    async def _prepare_genres(self, interaction: discord.Interaction) -> bool:
+        if not self.bot.settings.watchmode_api_key or self.bot.session is None:
+            await interaction.followup.send("Сервис фильмов не настроен.", ephemeral=True)
+            return False
+        async with self._genre_lock:
+            if not self.bot.watchmode.genre_id_to_name:
+                try:
+                    await self.bot.watchmode.load_genres(self.bot.session)
+                except (aiohttp.ClientError, TimeoutError, RuntimeError, ValueError):
+                    logger.warning("Watchmode genre lookup failed")
+            ready = bool(self.bot.watchmode.genre_id_to_name)
+        if not ready:
+            await interaction.followup.send("Жанры временно недоступны. Попробуйте позже.", ephemeral=True)
+        return ready
 
     @app_commands.command(name="genres", description="Показать доступные жанры")
     async def genres(self, interaction: discord.Interaction) -> None:
-        genres = self.bot.watchmode.genre_id_to_name
-        if not genres:
-            await interaction.response.send_message("Жанры пока не загружены.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        if not await self._prepare_genres(interaction):
             return
+        genres = self.bot.watchmode.genre_id_to_name
 
         lines = [f"`{genre_id}` — {name}" for genre_id, name in sorted(genres.items(), key=lambda x: x[1])]
         chunks: list[str] = []
@@ -31,7 +53,7 @@ class MoviesCog(commands.Cog):
         if current:
             chunks.append(current)
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"Доступные жанры для региона `{self.bot.settings.watchmode_region}`:\n\n{chunks[0]}", ephemeral=True
         )
         for chunk in chunks[1:]:
@@ -45,6 +67,8 @@ class MoviesCog(commands.Cog):
             return
 
         await interaction.response.defer()
+        if not await self._prepare_genres(interaction):
+            return
         genre_id = self.bot.watchmode.resolve_genre_id(genre)
         if genre_id is None:
             await interaction.followup.send("Не удалось распознать жанр. Используй `/genres`.")
@@ -107,6 +131,8 @@ class MoviesCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
+        if not await self._prepare_genres(interaction):
+            return
         genre_id = self.bot.watchmode.resolve_genre_id(genre)
         if genre_id is None:
             await interaction.followup.send("Не удалось распознать жанр. Используй `/genres`.", ephemeral=True)

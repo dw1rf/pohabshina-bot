@@ -98,8 +98,6 @@ async def main() -> None:
 
     if not settings.discord_token:
         raise RuntimeError("Не задан DISCORD_TOKEN")
-    if not settings.watchmode_api_key:
-        raise RuntimeError("Не задан WATCHMODE_API_KEY")
 
     from bot_client import MovieBot
 

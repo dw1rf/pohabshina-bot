@@ -154,7 +154,6 @@ class MovieBot(commands.Bot):
         self.automod_db = await self._open_database_connection()
         self.giveaway_db = await self._open_database_connection()
         self.delivery_db = await self._open_database_connection()
-        await self.watchmode.load_genres(self.session)
         log_voice_runtime(logger)
 
         loaded_cogs, skipped_cogs, failed_cogs = await self.load_cogs()

@@ -859,25 +859,19 @@ class MusicCog(commands.Cog):
         async with player.lock:
             player.stopped = False
             first_track = tracks[0]
-            if mode == "now":
+            if mode in ("now", "next"):
                 player.queue = tracks + player.queue
-                logger.info("Track queued as current: guild=%s title=%s count=%s", guild.id, first_track.title, len(tracks))
-                if voice_client.is_playing() or voice_client.is_paused():
-                    voice_client.stop()
-                    return "now", first_track, len(tracks)
-                started = await self.start_next_locked(player)
-                return "started" if started else "queued", first_track, len(tracks)
-
-            if mode == "next":
-                player.queue = tracks + player.queue
-                logger.info("Track queued next: guild=%s title=%s count=%s", guild.id, first_track.title, len(tracks))
             else:
                 player.queue.extend(tracks)
-                logger.info("Track queued: guild=%s title=%s count=%s", guild.id, first_track.title, len(tracks))
-
-            if player.current is None and not voice_client.is_playing() and not voice_client.is_paused():
-                started = await self.start_next_locked(player)
-                return "started" if started else "queued", first_track, len(tracks)
+            playing = voice_client.is_playing() or voice_client.is_paused()
+            if mode == "now" and playing:
+                voice_client.stop()
+            elif not playing and (mode == "now" or player.current is None):
+                if await self.start_next_locked(player):
+                    return "started", player.current, len(tracks)
+                if not player.queue:
+                    raise MusicUserError("Не удалось воспроизвести трек. Попробуйте другую запись.")
+                return "queued", first_track, len(tracks)
             return mode, first_track, len(tracks)
 
     async def start_next_locked(self, player: MusicPlayer) -> bool:
@@ -1146,9 +1140,9 @@ class MusicCog(commands.Cog):
 
         if result == "started":
             embed_title = "Включаю"
-        elif mode == "now":
+        elif result == "now":
             embed_title = "Включаю следующим"
-        elif mode == "next":
+        elif result == "next":
             embed_title = "Добавлено следующим"
         else:
             embed_title = "Добавлено в очередь"

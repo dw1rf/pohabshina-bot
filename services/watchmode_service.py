@@ -118,23 +118,27 @@ class WatchmodeService:
         if not isinstance(data, list):
             raise RuntimeError("Watchmode вернул неожиданный формат жанров")
 
-        self.genre_name_to_id.clear()
-        self.genre_id_to_name.clear()
+        names = {}
+        genres = {}
 
         for item in data:
+            if not isinstance(item, dict):
+                continue
             genre_id = item.get("id")
             genre_name = item.get("name")
             if not genre_id or not genre_name:
                 continue
             genre_name_ru = GENRE_RU.get(str(genre_name), str(genre_name))
-            self.genre_id_to_name[int(genre_id)] = genre_name_ru
-            self.genre_name_to_id[normalize_text(str(genre_name))] = int(genre_id)
-            self.genre_name_to_id[normalize_text(genre_name_ru)] = int(genre_id)
+            genres[int(genre_id)] = genre_name_ru
+            names[normalize_text(str(genre_name))] = int(genre_id)
+            names[normalize_text(genre_name_ru)] = int(genre_id)
 
         for ru_alias, english_name in COMMON_GENRE_ALIASES.items():
             normalized_en = normalize_text(english_name)
-            if normalized_en in self.genre_name_to_id:
-                self.genre_name_to_id[normalize_text(ru_alias)] = self.genre_name_to_id[normalized_en]
+            if normalized_en in names:
+                names[normalize_text(ru_alias)] = names[normalized_en]
+        self.genre_id_to_name = genres
+        self.genre_name_to_id = names
 
     def resolve_genre_id(self, value: str) -> int | None:
         value = value.strip()
