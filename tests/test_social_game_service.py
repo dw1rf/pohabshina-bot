@@ -8,7 +8,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from cogs.social_game_content import RP_ACTIONS, SERVICE_INSTRUCTIONS
+from cogs.social_game_content import RP_ACTIONS
 from services.social_game_service import SocialGameService
 
 
@@ -107,7 +107,6 @@ class SocialGameServiceTests(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_config_contains_safe_defaults(self) -> None:
-        self.assertIn("unban", SERVICE_INSTRUCTIONS)
         self.assertTrue(any(payload["nsfw"] for payload in RP_ACTIONS.values()))
         self.assertTrue(all("text" in payload for payload in RP_ACTIONS.values()))
         self.assertIn("прижать_к_стенке", RP_ACTIONS)

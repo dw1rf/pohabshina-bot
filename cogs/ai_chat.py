@@ -169,14 +169,14 @@ async def _post_json(
 
 
 def _extract_gemini_text(payload: dict[str, Any]) -> str:
-    parts: list[str] = []
     for candidate in payload.get("candidates", []) or []:
         content = candidate.get("content") or {}
-        for part in content.get("parts", []) or []:
-            text = part.get("text")
-            if text:
-                parts.append(str(text))
-    return "\n".join(parts).strip()
+        parts = [part["text"] for part in content.get("parts", [])
+                 if isinstance(part.get("text"), str) and not part.get("thought")]
+        answer = "\n".join(parts).strip()
+        if answer:
+            return answer
+    return ""
 
 
 def _extract_openai_response_text(payload: dict[str, Any]) -> str:
@@ -186,8 +186,10 @@ def _extract_openai_response_text(payload: dict[str, Any]) -> str:
 
     parts: list[str] = []
     for output in payload.get("output", []) or []:
+        if output.get("type") != "message":
+            continue
         for content in output.get("content", []) or []:
-            text = content.get("text")
+            text = content.get("text") if content.get("type") == "output_text" else None
             if text:
                 parts.append(str(text))
     if parts:
@@ -354,7 +356,7 @@ class AIChatCog(commands.Cog):
             memory_days=_env_int("AI_MEMORY_DAYS", 30, minimum=1),
             aliases=_env_aliases(),
             enable_memory=_env_bool("AI_ENABLE_MEMORY", True),
-            enable_random_replies=_env_bool("AI_ENABLE_RANDOM_REPLIES", True),
+            enable_random_replies=_env_bool("AI_ENABLE_RANDOM_REPLIES", False),
             enable_reactions=_env_bool("AI_ENABLE_REACTIONS", True),
             enable_image_describe=_env_bool("AI_ENABLE_IMAGE_DESCRIBE", False),
             max_prompt_length=_env_int("AI_MAX_PROMPT_LENGTH", 1800, minimum=200),
@@ -673,56 +675,33 @@ class AIChatCog(commands.Cog):
         )
         await self.bot.db.commit()
 
-    async def build_context(self, guild_id: int, channel_id: int, user_id: int, relation: dict[str, Any]) -> str:
-        if self.bot.db is None:
-            return ""
+    async def build_context(
+        self, guild_id: int, channel_id: int, user_id: int, *, before_message_id: int | None = None,
+        quoted_message_id: int = 0,
+    ) -> str:
         config = self.runtime_config()
-        parts: list[str] = []
-
-        cursor = await self.bot.db.execute(
-            """
-            SELECT user_id, content_clean
-            FROM ai_message_memory
-            WHERE guild_id = ? AND channel_id = ?
-            ORDER BY created_at DESC
-            LIMIT 10
-            """,
-            (guild_id, channel_id),
-        )
-        channel_rows = list(reversed(await cursor.fetchall()))
-        if channel_rows:
-            lines = [f"User{row['user_id']}: {row['content_clean']}" for row in channel_rows]
-            parts.append("[Память канала]\n" + "\n".join(lines))
-
-        cursor = await self.bot.db.execute(
-            """
-            SELECT content_clean
-            FROM ai_message_memory
-            WHERE guild_id = ? AND channel_id = ? AND user_id = ?
-            ORDER BY created_at DESC
-            LIMIT 8
-            """,
-            (guild_id, channel_id, user_id),
-        )
-        user_rows = list(reversed(await cursor.fetchall()))
-        if user_rows:
-            lines = [f"- {row['content_clean']}" for row in user_rows]
-            parts.append("[Память пользователя]\n" + "\n".join(lines))
-
-        guild_mood = await self.get_guild_mood(guild_id)
-        parts.append(
-            "[Отношение]\n"
-            f"relation: {relation['relation']}\n"
-            f"affection: {relation['affection']}\n"
-            f"irritation: {relation['irritation']}\n"
-            f"nickname: {relation['nickname'] or 'не задан'}\n"
-            f"guild_mood: {guild_mood['mood']}"
-        )
-
-        context = "\n\n".join(parts)
-        if len(context) <= config.context_limit_chars:
-            return context
-        return context[-config.context_limit_chars :]
+        if self.bot.db is None or not config.enable_memory:
+            return ""
+        async with self.bot.db.execute(
+            """SELECT user_id, content_clean FROM ai_message_memory
+               WHERE guild_id = ? AND channel_id = ? AND (? IS NULL OR message_id < ?)
+                 AND message_id != ?
+               ORDER BY message_id DESC LIMIT 10""",
+            (guild_id, channel_id, before_message_id, before_message_id, quoted_message_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        lines = []
+        remaining = config.context_limit_chars
+        for author_id, content in rows:
+            speaker = "Собеседник" if author_id == user_id else f"Участник {author_id}"
+            line = f"{speaker}: {content}"
+            if len(line) + 1 > remaining and lines:
+                break
+            lines.append(line[:remaining])
+            remaining -= len(lines[-1]) + 1
+            if remaining <= 0:
+                break
+        return "\n".join(reversed(lines))
 
     async def can_use_ai(self, guild_id: int, user_id: int) -> tuple[bool, str | None]:
         if self.bot.db is None:
@@ -804,7 +783,7 @@ class AIChatCog(commands.Cog):
             guild_mood["mood"],
             relation["nickname"],
         )
-        context = await self.build_context(interaction.guild.id, interaction.channel_id or 0, interaction.user.id, relation)
+        context = await self.build_context(interaction.guild.id, interaction.channel_id or 0, interaction.user.id)
         user_prompt = f"{context}\n\n[Новое сообщение]\n{interaction.user.display_name}: {clean_prompt}".strip()
 
         await interaction.response.defer(thinking=True, ephemeral=ephemeral)
@@ -1239,15 +1218,19 @@ class AIChatCog(commands.Cog):
         await self.maybe_add_reaction(message, mood)
 
         mentioned = self.bot.user in message.mentions
-        reply_to_bot = await self._is_reply_to_bot(message)
+        parent = await self._reply_parent(message)
+        reply_to_bot = parent is not None and parent.author.id == self.bot.user.id
         alias_hit = self._contains_alias(content, config.aliases)
-        random_hit = False
-        random_enabled = await self._get_setting_bool(message.guild.id, "random_replies_enabled", config.enable_random_replies)
-        if random_enabled:
-            random_hit = random.random() < config.random_reply_chance
         directly_addressed = mentioned or reply_to_bot or alias_hit
-        if not directly_addressed and not random_hit:
-            return
+        if not directly_addressed:
+            # A reply, mention or short fragment is usually part of someone else's conversation.
+            if message.reference or message.mentions or len(content.split()) < 4:
+                return
+            random_enabled = await self._get_setting_bool(
+                message.guild.id, "random_replies_enabled", config.enable_random_replies
+            )
+            if not random_enabled or random.random() >= config.random_reply_chance:
+                return
 
         relation = await self.get_relation(message.guild.id, message.author.id)
         await self.adjust_relation_from_message(message, mood, directly_addressed)
@@ -1282,7 +1265,17 @@ class AIChatCog(commands.Cog):
             guild_mood["mood"],
             relation["nickname"],
         )
-        context = await self.build_context(message.guild.id, message.channel.id, message.author.id, relation)
+        context = await self.build_context(
+            message.guild.id, message.channel.id, message.author.id, before_message_id=message.id,
+            quoted_message_id=parent.id if parent else 0,
+        )
+        if parent is not None:
+            speaker = "Vulgarities Bot" if reply_to_bot else parent.author.display_name
+            quote = self.persona.clean_memory_text(parent.clean_content)
+            if not quote and parent.attachments:
+                quote = "[вложение без текстового описания]"
+            if quote:
+                context += f"\n[Сообщение, на которое отвечают]\n{speaker}: {quote}"
         user_prompt = f"{context}\n\n[Новое сообщение]\n{message.author.display_name}: {_clean_prompt(prompt)}".strip()
 
         try:
@@ -1334,19 +1327,18 @@ class AIChatCog(commands.Cog):
             return True
         return channel.name.lower().startswith(("ticket-", "support-"))
 
-    async def _is_reply_to_bot(self, message: discord.Message) -> bool:
-        if self.bot.user is None or message.reference is None:
-            return False
-        resolved = message.reference.resolved
-        if isinstance(resolved, discord.Message):
-            return resolved.author.id == self.bot.user.id
-        if message.reference.message_id is None:
-            return False
+    async def _reply_parent(self, message: discord.Message) -> discord.Message | None:
+        reference = message.reference
+        if reference is None or reference.channel_id != message.channel.id:
+            return None
+        if isinstance(reference.resolved, discord.Message):
+            return reference.resolved
+        if reference.message_id is None:
+            return None
         try:
-            referenced = await message.channel.fetch_message(message.reference.message_id)
+            return await message.channel.fetch_message(reference.message_id)
         except discord.HTTPException:
-            return False
-        return referenced.author.id == self.bot.user.id
+            return None
 
     def _strip_bot_mention(self, content: str) -> str:
         if self.bot.user is None:
@@ -1357,7 +1349,7 @@ class AIChatCog(commands.Cog):
 
     def _contains_alias(self, content: str, aliases: tuple[str, ...]) -> bool:
         lowered = content.lower()
-        return any(re.search(rf"(?<!\w){re.escape(alias)}(?!\w)", lowered) for alias in aliases)
+        return any(re.match(rf"^{re.escape(alias)}(?!\w)", lowered.lstrip()) for alias in aliases)
 
 
 async def setup(bot: MovieBot) -> None:

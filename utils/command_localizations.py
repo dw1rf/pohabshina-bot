@@ -5,6 +5,7 @@ from discord import app_commands
 
 
 RU_COMMAND_NAMES: dict[str, str] = {
+    "command_stats": "статистика_команд",
     "add": "добавить",
     "afisha": "афиша",
     "ai": "ии",
@@ -27,7 +28,6 @@ RU_COMMAND_NAMES: dict[str, str] = {
     "delete": "удалить",
     "divorce": "развод",
     "forget_me": "забыть_меня",
-    "genres": "жанры",
     "helpme": "помогите",
     "history": "история",
     "how": "как",
@@ -40,8 +40,6 @@ RU_COMMAND_NAMES: dict[str, str] = {
     "memory_clear_user": "очистить_пользователя",
     "messages": "сообщения",
     "mood_set": "настроение",
-    "movie": "фильм",
-    "movies": "фильмы",
     "music": "музыка",
     "mute": "мут",
     "next": "следующим",
@@ -74,7 +72,6 @@ RU_COMMAND_NAMES: dict[str, str] = {
     "resume": "продолжить",
     "results": "итоги",
     "rules": "правила",
-    "rules_minecraft": "правила_майнкрафт",
     "role": "роль",
     "say": "сказать",
     "say_embed": "сказать_эмбед",
@@ -83,7 +80,6 @@ RU_COMMAND_NAMES: dict[str, str] = {
     "set_matchmaking": "знакомства",
     "set_profile_analytics": "аналитика_профилей",
     "set_story_nsfw": "нсфв_история",
-    "shop_panel": "магазин",
     "show": "показать",
     "shuffle": "перемешать",
     "skip": "пропустить",
@@ -91,7 +87,6 @@ RU_COMMAND_NAMES: dict[str, str] = {
     "status": "статус",
     "stop": "стоп",
     "story": "история",
-    "support_panel": "поддержка",
     "top": "топ",
     "tts": "озвучка",
     "tts_say": "сказать_голосом",

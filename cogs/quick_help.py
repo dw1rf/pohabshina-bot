@@ -73,7 +73,7 @@ class QuickHelpButtons(discord.ui.View):
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button[QuickHelpButtons]) -> None:
         embed = discord.Embed(
             title="Магазин",
-            description="Если магазин настроен, открой канал с услугами или используй `/shop_panel`, если его опубликовала администрация.",
+            description="Игровые предметы доступны через `/shop browse`. Ссылку на канал магазина ищи среди кнопок ниже.",
             color=discord.Color.blurple(),
         )
         await safe_reply(interaction, embed=embed, view=self.cog.link_view(interaction.guild), ephemeral=True)
@@ -82,7 +82,7 @@ class QuickHelpButtons(discord.ui.View):
     async def support(self, interaction: discord.Interaction, button: discord.ui.Button[QuickHelpButtons]) -> None:
         embed = discord.Embed(
             title="Поддержка",
-            description="Опиши вопрос в канале поддержки или создай обращение через опубликованную панель поддержки.",
+            description="Опиши вопрос в канале поддержки или обратись к модератору сервера.",
             color=discord.Color.green(),
         )
         await safe_reply(interaction, embed=embed, view=self.cog.link_view(interaction.guild), ephemeral=True)

@@ -20,8 +20,6 @@ from services.level_service import LevelService
 from services.reputation_service import ReputationService
 from services.reaction_ban_service import ReactionBanService
 from services.reaction_role_service import ReactionRoleService
-from services.support_ticket_service import SupportTicketService
-from services.watchmode_service import WatchmodeService
 from services.social_game_service import SocialGameService
 from services.economy_service import EconomyService
 from services.progression_service import ProgressionService
@@ -57,19 +55,16 @@ class MovieBot(commands.Bot):
         self.giveaway_db: aiosqlite.Connection | None = None
         self.delivery_db: aiosqlite.Connection | None = None
 
-        self.watchmode = WatchmodeService(settings)
         self.levels = LevelService(settings)
         self.jails = JailService()
         self.reputation = ReputationService()
         self.reaction_bans = ReactionBanService()
         self.reaction_roles = ReactionRoleService()
-        self.support_tickets = SupportTicketService()
         self.social_games = SocialGameService()
         self.economy = EconomyService()
         self.progression = ProgressionService()
         self.engagement_content: EngagementContent = load_engagement_content(settings.engagement_content_path)
         self._extensions_bootstrapped = False
-        self._support_category_logged = False
         self._last_mc_status_error: str | None = None
         self._bad_mod_log_channel_ids: set[int] = set()
         self._mc_server = JavaServer("5.83.140.210", 25780)
@@ -138,7 +133,6 @@ class MovieBot(commands.Bot):
         await self.reputation.init_rep_db(self.db)
         await self.reaction_bans.init_db(self.db)
         await self.reaction_roles.init_db(self.db)
-        await self.support_tickets.init_db(self.db)
         await self.social_games.init_db(self.db)
         # Critical moderation/reputation transactions must not share a
         # connection with unrelated listeners that can commit mid-operation.
@@ -272,68 +266,6 @@ class MovieBot(commands.Bot):
         if not self.minecraft_presence_loop.is_running():
             self.minecraft_presence_loop.start()
         logger.debug("Logged in as %s (ID: %s)", self.user, self.user.id if self.user else "unknown")
-        if not self._support_category_logged:
-            self._support_category_logged = True
-            await self.log_support_category_startup_diagnostics()
-
-    @staticmethod
-    def _missing_support_permissions(permissions: discord.Permissions) -> list[str]:
-        required = {
-            "view_channel": permissions.view_channel,
-            "manage_channels": permissions.manage_channels,
-            "manage_permissions": permissions.manage_roles,
-            "send_messages": permissions.send_messages,
-            "embed_links": permissions.embed_links,
-            "read_message_history": permissions.read_message_history,
-        }
-        return [name for name, allowed in required.items() if not allowed]
-
-    async def log_support_category_startup_diagnostics(self) -> None:
-        if self.settings.support_category_error:
-            logger.warning("%s", self.settings.support_category_error)
-            return
-
-        category_id = self.settings.support_category_id
-        cached = self.get_channel(category_id)
-        category: discord.CategoryChannel | None = cached if isinstance(cached, discord.CategoryChannel) else None
-        if cached is not None and category is None:
-            logger.warning("SUPPORT_CATEGORY_ID points to %s, not CategoryChannel: id=%s", type(cached).__name__, category_id)
-            return
-
-        if category is None:
-            try:
-                fetched = await self.fetch_channel(category_id)
-            except discord.NotFound:
-                logger.warning("Support category not found through cache or fetch: id=%s", category_id)
-                return
-            except discord.Forbidden:
-                logger.warning("Support category fetch forbidden: id=%s", category_id)
-                return
-            except discord.HTTPException as exc:
-                logger.warning("Support category fetch failed: id=%s error=%s", category_id, exc)
-                return
-            if not isinstance(fetched, discord.CategoryChannel):
-                logger.warning("SUPPORT_CATEGORY_ID points to %s, not CategoryChannel: id=%s", type(fetched).__name__, category_id)
-                return
-            category = fetched
-
-        me = category.guild.me
-        if me is None and self.user is not None:
-            me = category.guild.get_member(self.user.id)
-        if me is None:
-            logger.warning("Support category found but bot member is unavailable: id=%s guild=%s", category.id, category.guild.id)
-            return
-
-        missing = self._missing_support_permissions(category.permissions_for(me))
-        if missing:
-            logger.warning(
-                "Support category permissions missing: id=%s guild=%s missing=%s",
-                category.id,
-                category.guild.id,
-                ",".join(missing),
-            )
-            return
-        logger.info("Support category ready: id=%s guild=%s name=%s", category.id, category.guild.id, category.name)
 
     @tasks.loop(seconds=60)
     async def minecraft_presence_loop(self) -> None:

@@ -5,30 +5,8 @@ from unittest.mock import AsyncMock, Mock
 import aiosqlite
 import discord
 
-from cogs.anime_feeds import AnimeFeedsCog
 from cogs.starboard import StarboardCog
-from utils.brand import BRAND_COLOR, BRAND_PURPLE
-
-
-def test_anime_feed_publishes_purple_card():
-    async def scenario():
-        async with aiosqlite.connect(":memory:") as db:
-            db.row_factory = aiosqlite.Row
-            channel = Mock(spec=discord.TextChannel)
-            channel.send = AsyncMock()
-            bot = SimpleNamespace(db=db, wait_until_ready=asyncio.Event().wait, get_channel=lambda _: channel)
-            cog = AnimeFeedsCog(bot)
-            await cog.cog_load()
-            await cog.cog_unload()
-            await db.execute("INSERT INTO anime_feed_subscriptions(guild_id,channel_id) VALUES (1,2)")
-            await db.commit()
-            cog._fetch_schedule = AsyncMock(return_value=[{"id": 4, "airingAt": 1, "media": {"title": {"english": "Show"}}}])
-            cog._already_posted = AsyncMock(return_value=False)
-            await cog.poll_airing()
-            channel.send.assert_awaited_once()
-            assert channel.send.await_args.kwargs["embed"].colour.to_rgb() == BRAND_PURPLE
-
-    asyncio.run(scenario())
+from utils.brand import BRAND_COLOR
 
 
 def test_starboard_publishes_public_card_and_skips_restricted_source():

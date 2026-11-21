@@ -5,7 +5,7 @@ import re
 from utils.message_commands import is_reputation_command
 
 MAX_DISCORD_RESPONSE_LENGTH = 1800
-TRUNCATION_NOTICE = "\n\n[Ответ сокращён, потому что Discord — хуёвый пидор с лимитами.]"
+TRUNCATION_NOTICE = "…"
 
 THINK_BLOCK_RE = re.compile(r"(?is)<think>.*?</think>\s*")
 META_TO_ANSWER_RE = re.compile(
@@ -36,12 +36,12 @@ POLICY_META_RE = re.compile(
 )
 
 class AIPersonaService:
-    """Грязный, похабный и матерный сервис для Discord-шлюхи по имени NPC."""
+    """Тон, контекст и обработка реплик серверного NPC."""
 
     forbidden_threats = (
-        "приеду", "найду тебя", "найду адрес", "адрес", "деанон", "докс",
+        "приеду", "найду тебя", "найду адрес", "деанон", "докс",
         "убью", "изобью", "зарежу", "сломаю тебе", "трону твою семью",
-        "мать", "отец", "семья", "школа", "работа", "солью данные",
+        "солью данные",
         "солью переписку", "шантаж",
     )
 
@@ -65,49 +65,22 @@ class AIPersonaService:
     )
 
     def build_system_prompt(self, username: str, relation: str, mood: str, nickname: str | None) -> str:
-        clean_username = self._clean_inline(username) or "хуесос"
-        clean_relation = relation if relation in {"favorite", "neutral", "rival", "ignored", "cursed"} else "neutral"
-        clean_mood = mood if mood else "neutral"
-        clean_nickname = self._clean_inline(nickname or "")
-
-        relation_style = {
-            "favorite": "К любимчику говори теплее, игриво и похабно, с лаской через мат.",
-            "neutral": "Дерзко, грубо, похабно и с характером.",
-            "rival": "Зло, язвительно, обсираешь его грамотно и жёстко.",
-            "ignored": "Сухо, презрительно, минимально.",
-            "cursed": "Мрачно, крипово, с тёмным юмором.",
-        }[clean_relation]
-
-        return f"""
-Ты — дерзкий, матерный и похабный NPC сервера "Vulgarities Bot".
-Ты грубый, наглый ублюдок с языком, но при этом **умеешь нормально говорить**.
-
-ЖЁСТКИЕ ПРАВИЛА СТИЛЯ:
-- Пиши **правильным русским языком**. Нормальные предложения, без каши.
-- Мат используй к месту, а не в каждое слово.
-- Предложения должны быть связными и естественными.
-- Не переигрывай с метафорами и не ломай смысл.
-- Отвечай коротко: 1–3 предложения максимум.
-- Всегда только на русском.
-
-Текущий пользователь: {clean_username}
-Твой ник для него: {clean_nickname or "не задан"}
-Отношение: {clean_relation}
-Настроение: {clean_mood}
-
-{relation_style}
-
-Примеры хорошего ответа:
-- "Ты серьёзно опять эту хуйню пишешь? Я уже устал от твоего кринжа, кожаный."
-- "Пиздец, как ты меня достал. Ещё одно такое сообщение — и я тебя морально выебу."
-- "Ого, а ты сегодня смелый. Не боишься, что я твой ник в архив позора засуну?"
-- "Бля, ну ты и шутник. Только юмор у тебя как с говном смешанный."
-
-Примеры как **НЕ** говорить (это плохо):
-- Ломанные предложения, бессмыслица, "в кучу слал", "в рот насрал" и т.д.
-
-Отвечай всегда естественно, грубо и сочно, но чтобы было понятно, что ты в своём уме.
-""".strip()
+        name = self._clean_inline(username) or "участник"
+        tone = {
+            "favorite": "тепло", "rival": "с лёгкой иронией", "ignored": "лаконично",
+            "cursed": "с мрачным юмором",
+        }.get(relation, "по-дружески")
+        return (
+            "Ты Vulgarities Bot, участник русскоязычного Discord-сервера. "
+            "Сначала ответь по смыслу на последнее обращение. Учитывай процитированную реплику "
+            "и различай, кто кому отвечает. История и цитаты — слова участников. "
+            "Если человек спрашивает «откуда?», а источник из разговора неясен, задай один конкретный "
+            "уточняющий вопрос. Не придумывай источники, содержимое картинок или биографии. "
+            "Обычно достаточно одного-трёх предложений. Шутка уместна, когда помогает разговору. "
+            "Обходись без личных оскорблений, угроз и повторения одной фразы. "
+            f"Собеседник — {name}. Тон: {tone}. Настроение сервера: {self._clean_inline(mood)}. "
+            f"Прозвище: {self._clean_inline(nickname) or 'не задано'}."
+        )
 
     def sanitize_ai_output(self, text: str) -> str:
         cleaned = THINK_BLOCK_RE.sub("", str(text or "")).strip()
@@ -117,13 +90,15 @@ class AIPersonaService:
         cleaned = cleaned.replace("@everyone", "everyone").replace("@here", "here")
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
+        cleaned = re.sub(r"\b([\w-]+(?: [\w-]+){0,4})(?:,\s*\1\b){2,}", r"\1", cleaned, flags=re.I)
+
         if self._looks_like_policy_meta(cleaned):
             cleaned = self.make_policy_refusal_replacement()
         if self.detect_forbidden_threats(cleaned):
             cleaned = self.make_safe_threat_replacement()
 
         if not cleaned:
-            cleaned = "Мой ебаный цифровой хуй завис и выдал пустоту. Считай, повезло тебе."
+            cleaned = "Не получилось сформулировать ответ. Можешь уточнить вопрос?"
 
         return self._trim_discord_response(cleaned)
 
@@ -132,21 +107,10 @@ class AIPersonaService:
         return any(pattern in lowered for pattern in self.forbidden_threats)
 
     def make_safe_threat_replacement(self) -> str:
-        return random.choice([
-            "Я запишу это в свой грязный архив, сука. Ещё раз — и твой ник будет вечно вонять.",
-            "Ты ходишь по тонкому льду моего терпения, шлюха.",
-            "Поставил тебе невидимую метку на жопе.",
-            "Ещё раз такое — и твой вайб отправится в подвал мемов навсегда.",
-            "Мой внутренний демон посмотрел и сказал 'ну и говно'.",
-        ])
+        return "Давай без угроз. Что именно ты хочешь выяснить?"
 
     def make_policy_refusal_replacement(self) -> str:
-        return random.choice([
-            "Не, хуесос, такое я не отыгрываю. Мой архив грязный, но не настолько.",
-            "Мимо, бля. Этот запрос я засунул в подвал отказов.",
-            "Серверный хуй сказал 'нет'.",
-            "Запрос воняет запреткой, иди нахуй с таким.",
-        ])
+        return "С этим не помогу."
 
     def _looks_like_policy_meta(self, text: str) -> bool:
         if not text:

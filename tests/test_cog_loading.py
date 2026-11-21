@@ -19,7 +19,6 @@ def test_every_extension_loads_without_command_collisions(tmp_path) -> None:
             await bot.reputation.init_rep_db(bot.db)
             await bot.reaction_bans.init_db(bot.db)
             await bot.reaction_roles.init_db(bot.db)
-            await bot.support_tickets.init_db(bot.db)
             await bot.social_games.init_db(bot.db)
 
             bot.economy_db = await bot._open_database_connection()
@@ -34,6 +33,11 @@ def test_every_extension_loads_without_command_collisions(tmp_path) -> None:
 
             loaded, _, failed = await bot.load_cogs()
             assert failed == []
+            assert "cogs.command_stats" in loaded
+            assert bot.tree.get_command("command_stats") is not None
+            for removed in ("genres", "movie", "movies", "anime_feed", "support_panel", "shop_panel", "support_debug", "rules_minecraft"):
+                assert bot.tree.get_command(removed) is None
+            assert bot.tree.get_command("rating") and bot.tree.get_command("shop")
             assert "cogs.quick_help" in loaded
             assert "cogs.moderation" in loaded
             assert len(bot.tree.get_commands()) <= 100

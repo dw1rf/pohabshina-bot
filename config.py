@@ -39,27 +39,16 @@ def _normalize_discord_id(raw: str | None) -> tuple[str, int, str | None]:
 @dataclass(slots=True)
 class Settings:
     discord_token: str
-    watchmode_api_key: str
-    watchmode_region: str
-    watchmode_limit: int
     target_channel_id: int
     control_channel_id: int
     delete_control_messages: bool
     allowed_user_ids: set[int]
     allowed_role_ids: set[int]
     mod_log_channel_id: int
-    translate_api_url: str
-    translate_api_key: str
-    translate_source_lang: str
-    translate_target_lang: str
-    show_both_titles: bool
     db_path: str
     support_category_raw: str
     support_category_id: int
     support_category_error: str | None
-    support_admin_role_id: int
-    support_log_channel_id: int
-    shop_requests_to_support: bool
     movie_rating_channel_id: int
     afisha_channel_id: int
     rules_channel_id: int
@@ -82,27 +71,16 @@ def load_settings() -> Settings:
     )
     return Settings(
         discord_token=os.getenv("DISCORD_TOKEN", "").strip(),
-        watchmode_api_key=os.getenv("WATCHMODE_API_KEY", "").strip(),
-        watchmode_region=os.getenv("WATCHMODE_REGION", "US").strip() or "US",
-        watchmode_limit=int(os.getenv("WATCHMODE_LIMIT", "80")),
         target_channel_id=int(os.getenv("TARGET_CHANNEL_ID", "0") or 0),
         control_channel_id=int(os.getenv("CONTROL_CHANNEL_ID", "0") or 0),
         delete_control_messages=_parse_bool(os.getenv("DELETE_CONTROL_MESSAGES", "false")),
         allowed_user_ids=_parse_int_set(os.getenv("ALLOWED_USER_IDS", "")),
         allowed_role_ids=_parse_int_set(os.getenv("ALLOWED_ROLE_IDS", "")),
         mod_log_channel_id=int(os.getenv("MOD_LOG_CHANNEL_ID", "0") or 0),
-        translate_api_url=os.getenv("TRANSLATE_API_URL", "").strip(),
-        translate_api_key=os.getenv("TRANSLATE_API_KEY", "").strip(),
-        translate_source_lang=os.getenv("TRANSLATE_SOURCE_LANG", "auto").strip() or "auto",
-        translate_target_lang=os.getenv("TRANSLATE_TARGET_LANG", "ru").strip() or "ru",
-        show_both_titles=_parse_bool(os.getenv("SHOW_BOTH_TITLES", "1"), default=True),
         db_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         support_category_raw=support_category_raw,
         support_category_id=support_category_id,
         support_category_error=support_category_error,
-        support_admin_role_id=int(os.getenv("SUPPORT_ADMIN_ROLE_ID", "0") or 0),
-        support_log_channel_id=int(os.getenv("SUPPORT_LOG_CHANNEL_ID", "0") or 0),
-        shop_requests_to_support=_parse_bool(os.getenv("SHOP_REQUESTS_TO_SUPPORT", "true"), default=True),
         movie_rating_channel_id=int(os.getenv("MOVIE_RATING_CHANNEL_ID", "0") or 0),
         afisha_channel_id=int(os.getenv("AFISHA_CHANNEL_ID", "0") or 0),
         rules_channel_id=int(os.getenv("RULES_CHANNEL_ID", "0") or 0),

@@ -38,8 +38,7 @@ def test_history_filters_by_both_permissions_before_applying_limit():
             assert reply.kwargs["ephemeral"]
             assert "sample visible" in reply.args[0]
             assert "restricted" not in reply.args[0] and "missing channel" not in reply.args[0]
-            relation = await cog.get_relation(1, 7)
-            context = await cog.build_context(1, 1, 7, relation)
+            context = await cog.build_context(1, 1, 7)
             assert "sample visible" in context
             assert "restricted" not in context and "missing channel" not in context
 
