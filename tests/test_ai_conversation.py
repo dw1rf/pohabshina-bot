@@ -33,13 +33,22 @@ def test_replies_follow_the_addressed_conversation(monkeypatch):
             )
             cog.maybe_add_reaction = AsyncMock()
             cog.adjust_relation_from_message = AsyncMock()
+            monkeypatch.setenv("AI_GLOBAL_COOLDOWN_SECONDS", "0")
+            monkeypatch.setenv("AI_USER_COOLDOWN_SECONDS", "0")
+            monkeypatch.setenv("AI_ENABLE_MEMORY", "true")
             generate = AsyncMock(return_value="Ты про оплату за три смены?")
             monkeypatch.setattr("cogs.ai_chat.generate_ai_response", generate)
-            monkeypatch.setenv("AI_ENABLE_RANDOM_REPLIES", "true")
+            monkeypatch.delenv("AI_ENABLE_RANDOM_REPLIES", raising=False)
             monkeypatch.setattr("cogs.ai_chat.random.random", lambda: 0)
             await cog.on_message(message)
             generate.assert_not_awaited()
             message.reply.assert_not_awaited()
+
+            reference = message.reference
+            message.reference = None
+            await cog.on_message(message)
+            generate.assert_not_awaited()
+            message.reference = reference
 
             message.mentions = [bot_user]
             message.content = "<@11> Откуда"
@@ -53,6 +62,32 @@ def test_replies_follow_the_addressed_conversation(monkeypatch):
             assert await cog._reply_parent(message) is None
             channel.fetch_message.assert_not_called()
 
+            message.id = 11
+            message.reference = None
+            message.mentions = []
+            message.content = message.clean_content = "На выходных собираемся в поход"
+            generate.return_value = "А какой маршрут выбрали?"
+            message.reply.reset_mock()
+            await cog.on_message(message)
+            instructions, context, _ = generate.await_args.args
+            assert "[ПРОПУСК]" in instructions
+            assert message.content in context
+            message.reply.assert_awaited_once()
+            assert message.reply.await_args.args == ("А какой маршрут выбрали?",)
+
+            generate.return_value = "[ПРОПУСК]"
+            message.id = 12
+            message.content = message.clean_content = "Хотим пройти вдоль реки"
+            message.reply.reset_mock()
+            await cog.on_message(message)
+            assert "На выходных собираемся в поход" in generate.await_args.args[1]
+            message.reply.assert_not_awaited()
+
+            await cog._set_setting_bool(guild.id, "random_replies_enabled", False)
+            generate.reset_mock()
+            await cog.on_message(message)
+            generate.assert_not_awaited()
+
     asyncio.run(scenario())
 
 
@@ -62,7 +97,7 @@ def test_plain_language_and_repetitions(monkeypatch):
     assert persona.sanitize_ai_output("В чат, в чат, в чат, в чат.") == "В чат."
     cog = AIChatCog(SimpleNamespace())
     monkeypatch.delenv("AI_ENABLE_RANDOM_REPLIES", raising=False)
-    assert not cog.runtime_config().enable_random_replies
+    assert cog.runtime_config().enable_random_replies
     assert cog._contains_alias("Бот, откуда цифра?", ("бот",))
     assert not cog._contains_alias("Кто знает, где бот?", ("бот",))
 

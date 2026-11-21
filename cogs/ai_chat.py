@@ -356,7 +356,7 @@ class AIChatCog(commands.Cog):
             memory_days=_env_int("AI_MEMORY_DAYS", 30, minimum=1),
             aliases=_env_aliases(),
             enable_memory=_env_bool("AI_ENABLE_MEMORY", True),
-            enable_random_replies=_env_bool("AI_ENABLE_RANDOM_REPLIES", False),
+            enable_random_replies=_env_bool("AI_ENABLE_RANDOM_REPLIES", True),
             enable_reactions=_env_bool("AI_ENABLE_REACTIONS", True),
             enable_image_describe=_env_bool("AI_ENABLE_IMAGE_DESCRIBE", False),
             max_prompt_length=_env_int("AI_MAX_PROMPT_LENGTH", 1800, minimum=200),
@@ -1269,6 +1269,12 @@ class AIChatCog(commands.Cog):
             message.guild.id, message.channel.id, message.author.id, before_message_id=message.id,
             quoted_message_id=parent.id if parent else 0,
         )
+        if not directly_addressed:
+            system_prompt += (
+                "\nК тебе не обращались напрямую. Вступи в разговор, только если можешь "
+                "добавить короткую реплику по теме последнего сообщения. Если тема неясна "
+                "или добавить нечего, верни только [ПРОПУСК]."
+            )
         if parent is not None:
             speaker = "Vulgarities Bot" if reply_to_bot else parent.author.display_name
             quote = self.persona.clean_memory_text(parent.clean_content)
@@ -1283,9 +1289,13 @@ class AIChatCog(commands.Cog):
                 try:
                     answer = await generate_ai_response(system_prompt, user_prompt, config)
                 except AIRateLimited:
+                    if not directly_addressed:
+                        return
                     answer = GROQ_LIMIT_MESSAGE
                 else:
                     await self.increment_ai_usage(message.guild.id, message.author.id)
+                if not directly_addressed and answer.strip() == "[ПРОПУСК]":
+                    return
                 answer = self.persona.sanitize_ai_output(answer)
                 await message.reply(answer, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
