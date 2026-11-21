@@ -17,6 +17,7 @@ def test_playback_feedback_matches_queue(mode, include_playable):
         voice.is_playing.return_value = voice.is_paused.return_value = False
         voice.is_connected.return_value = True
         cog.ensure_voice = AsyncMock(return_value=voice)
+        cog.get_player(1).voice_client = voice
         broken = Track("broken", "https://example.com/a", "a", 5, 1, "listener")
         good = Track("playable", "https://example.com/b", "b", 5, 1, "listener")
         cog.extract_tracks = AsyncMock(return_value=([broken, good] if include_playable else [broken], False))
@@ -30,7 +31,7 @@ def test_playback_feedback_matches_queue(mode, include_playable):
         cog.start_track_locked = start
         success = AsyncMock()
         error = AsyncMock()
-        await cog.handle_add(SimpleNamespace(id=1), Mock(), "song", mode=mode, send_error=error, send_success=success)
+        await cog.handle_add(SimpleNamespace(id=1, voice_client=voice), Mock(), "song", mode=mode, send_error=error, send_success=success)
         assert not cog.get_player(1).queue
         if include_playable:
             error.assert_not_awaited()
